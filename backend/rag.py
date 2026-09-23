@@ -2,13 +2,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
-import urllib.error
 import urllib.request
 from functools import lru_cache
 from typing import Any
 
 from sentence_transformers import SentenceTransformer
+
+logger = logging.getLogger(__name__)
 
 @lru_cache(maxsize=1)
 def embedding_model() -> SentenceTransformer:
@@ -40,6 +42,23 @@ def answer(question: str, hits: list[dict[str, Any]]) -> str:
     api_key = os.getenv("LLM_API_KEY")
     if not api_key:
         return _extractive_answer(hits)
+    base_url = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+    payload = json.dumps({"model": os.getenv("LLM_MODEL", "gpt-4o-mini"), "temperature": 0.2,
+        "messages": [
+            {"role": "system", "content": "You are a precise academic assistant. Answer only from supplied sources. Cite every factual claim as [n]."},
+            {"role": "user", "content": f"SOURCES:\n{_context(hits)}\n\nQUESTION: {question}"}
+        ]}).encode("utf-8")
+    request = urllib.request.Request(f"{base_url}/chat/completions", data=payload,
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=45) as response:
+            content = json.loads(response.read())["choices"][0]["message"]["content"]
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+    except Exception:
+        # Keep document chat usable when the optional LLM service is unavailable.
+        logger.warning("LLM chat request failed; using retrieved passages instead", exc_info=True)
+    return _extractive_answer(hits)
 
 
 def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], count: int = 8) -> dict[str, Any]:
@@ -82,24 +101,18 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}, method="POST")
     try:
         with urllib.request.urlopen(request, timeout=60) as response:
-            content = json.loads(response.read())["choices"][0]["message"]["content"].strip()
+            content = json.loads(response.read())["choices"][0]["message"]["content"]
+        if not isinstance(content, str) or not content.strip():
+            return fallback_data
+        content = content.strip()
         start, end = content.find("{"), content.rfind("}")
+        if start < 0 or end < start:
+            return fallback_data
         result = json.loads(content[start:end + 1])
         if not isinstance(result, dict):
             raise ValueError("Expected a JSON object")
         return result
-    except (urllib.error.URLError, urllib.error.HTTPError, KeyError, IndexError, json.JSONDecodeError, ValueError):
+    except Exception:
+        # A model/provider response must not prevent source-based study material from being saved.
+        logger.warning("LLM study generation failed; using retrieved paper content instead", exc_info=True)
         return fallback_data
-    base_url = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/")
-    payload = json.dumps({"model": os.getenv("LLM_MODEL", "gpt-4o-mini"), "temperature": 0.2,
-        "messages": [
-            {"role": "system", "content": "You are a precise academic assistant. Answer only from supplied sources. Cite every factual claim as [n]."},
-            {"role": "user", "content": f"SOURCES:\n{_context(hits)}\n\nQUESTION: {question}"}
-        ]}).encode("utf-8")
-    request = urllib.request.Request(f"{base_url}/chat/completions", data=payload,
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}, method="POST")
-    try:
-        with urllib.request.urlopen(request, timeout=45) as response:
-            return json.loads(response.read())["choices"][0]["message"]["content"].strip()
-    except (urllib.error.URLError, urllib.error.HTTPError, KeyError, IndexError, json.JSONDecodeError):
-        return _extractive_answer(hits)
