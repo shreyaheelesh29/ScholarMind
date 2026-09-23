@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { clearSession } from "../api";
 
 export default function Settings() {
   const navigate = useNavigate();
@@ -62,7 +63,7 @@ export default function Settings() {
             </button>
           ))}
           <div className="mt-3 p-2">
-            <button onClick={() => navigate("/login")} className="w-full p-3 rounded-xl border-2 border-error-100 text-error-600 font-bold text-sm hover:bg-error-50 transition flex items-center justify-center gap-1.5">
+            <button onClick={() => { clearSession(); navigate("/login"); }} className="w-full p-3 rounded-xl border-2 border-error-100 text-error-600 font-bold text-sm hover:bg-error-50 transition flex items-center justify-center gap-1.5">
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" /></svg>
               Sign Out
             </button>

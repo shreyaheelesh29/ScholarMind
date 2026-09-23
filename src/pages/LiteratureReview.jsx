@@ -1,4 +1,5 @@
 import { useState } from "react";
+import ArtifactGenerator from "../components/research/ArtifactGenerator";
 
 const paperLibrary = [
   { id: 1, title: "Attention Is All You Need", authors: "Vaswani et al.", year: 2017, venue: "NeurIPS", citations: "98K", selected: true, tags: ["Architecture"] },
@@ -66,7 +67,6 @@ const references = [
 export default function LiteratureReview() {
   const [topic, setTopic] = useState("The Evolution of Transformer Architectures: From Attention Mechanisms to Scalable Language Models");
   const [papers, setPapers] = useState(paperLibrary);
-  const [generating, setGenerating] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [exportDropdownOpen, setExportDropdownOpen] = useState(false);
 
@@ -101,6 +101,7 @@ export default function LiteratureReview() {
 
   return (
     <div className="space-y-6 animate-fade-in">
+      <ArtifactGenerator id="literature-review-generator" kinds={["literature_review"]} multiPaper heading="Generate a literature review across your uploaded papers" />
       <div className="flex items-start justify-between gap-4 flex-wrap">
         <div>
           <p className="text-sm font-medium text-primary-600">AI Research Analysis</p>
@@ -295,14 +296,13 @@ export default function LiteratureReview() {
 
             <div className="px-5 py-4 border-t border-slate-100 bg-slate-50/60">
               <button
-                onClick={() => { setGenerating(true); setTimeout(() => setGenerating(false), 2000); }}
-                disabled={selectedCount < 2 || generating}
+                onClick={() => document.getElementById("literature-review-generator")?.scrollIntoView({ behavior: "smooth", block: "center" })}
                 className="w-full py-3 rounded-xl bg-gradient-to-r from-primary-600 to-accent-500 text-white font-bold text-sm shadow-lg shadow-primary-500/25 hover:shadow-xl hover:shadow-primary-500/30 transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
               >
-                <svg className={`w-4 h-4 ${generating ? "animate-spin" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
                 </svg>
-                {generating ? "Regenerating Review..." : `Generate with ${selectedCount} Papers →`}
+                Generate from uploaded papers →
               </button>
             </div>
           </div>

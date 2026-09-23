@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
+import { apiFetch, saveSession } from "../api";
 
 export default function Login() {
   const navigate = useNavigate();
@@ -10,7 +11,7 @@ export default function Login() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
 
     setError("");
@@ -22,14 +23,14 @@ export default function Login() {
     }
 
     setLoading(true);
-
-    // Temporary login simulation
-    setTimeout(() => {
-      setLoading(false);
-
-      // Temporary frontend-only navigation
+    apiFetch("/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    }).then((result) => {
+      saveSession(result);
       navigate("/dashboard");
-    }, 1000);
+    }).catch((err) => setError(err.message)).finally(() => setLoading(false));
   };
 
   return (

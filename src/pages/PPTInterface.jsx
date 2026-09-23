@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { apiFetch } from "../api";
 
 const initialSlides = [
   {
@@ -123,6 +124,10 @@ const initialSlides = [
 export default function PPTInterface() {
   const navigate = useNavigate();
   const [slides, setSlides] = useState(initialSlides);
+  const [availablePapers, setAvailablePapers] = useState([]);
+  const [selectedPaperId, setSelectedPaperId] = useState("");
+  const [generationError, setGenerationError] = useState("");
+  const [pptArtifact, setPptArtifact] = useState(null);
   const [current, setCurrent] = useState(0);
   const [generating, setGenerating] = useState(false);
   const [generationProgress, setGenerationProgress] = useState(0);
@@ -131,21 +136,41 @@ export default function PPTInterface() {
 
   const slide = slides[current];
 
+  useEffect(() => {
+    apiFetch("/papers").then(({ papers }) => {
+      setAvailablePapers(papers);
+      if (papers.length) setSelectedPaperId(papers[0].id);
+    }).catch((err) => setGenerationError(err.message));
+  }, []);
+
   const go = (dir) => setCurrent((i) => Math.max(0, Math.min(slides.length - 1, i + dir)));
 
-  const handleGenerate = () => {
+  const handleGenerate = async () => {
+    if (!selectedPaperId) { setGenerationError("Upload a paper first, then select it above."); return; }
     setGenerating(true);
-    setGenerationProgress(0);
-    const interval = setInterval(() => {
-      setGenerationProgress((prev) => {
-        if (prev >= 100) {
-          clearInterval(interval);
-          setGenerating(false);
-          return 100;
-        }
-        return prev + 4;
-      });
-    }, 80);
+    setGenerationProgress(15);
+    setGenerationError("");
+    try {
+      const result = await apiFetch("/learning/generate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind: "ppt_outline", paper_id: selectedPaperId, count: 8 }) });
+      const content = result.artifact.payload || {};
+      setPptArtifact(result.artifact);
+      const generated = (content.slides || []).map((item, i) => ({
+        id: i + 1, type: "generated", label: item.title || `Slide ${i + 1}`, title: item.title || `Slide ${i + 1}`,
+        bullets: Array.isArray(item.content) ? item.content : String(item.content || "").split(/(?<=[.!?])\s+/).filter(Boolean),
+        speakerNotes: item.speaker_notes || "", page: item.page, icon: "📄", gradient: ["from-indigo-500 to-purple-500", "from-blue-500 to-cyan-500", "from-emerald-500 to-teal-500"][i % 3],
+      }));
+      if (!generated.length) throw new Error("The service returned no slides. Try again with a different paper.");
+      setSlides(generated); setCurrent(0); setGenerationProgress(100);
+    } catch (err) { setGenerationError(err.message); }
+    finally { setGenerating(false); }
+  };
+
+  const savePresenterNotes = (notes) => {
+    if (!pptArtifact?.id) return;
+    const previous = pptArtifact.payload || {};
+    const payload = { ...previous, slides: (previous.slides || []).map((item, i) => i === current ? { ...item, speaker_notes: notes } : item) };
+    setPptArtifact((item) => ({ ...item, payload }));
+    apiFetch(`/artifacts/${pptArtifact.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ payload }) }).catch((err) => setGenerationError(`Could not save presenter notes: ${err.message}`));
   };
 
   const handleDragStart = (e, index) => {
@@ -188,10 +213,8 @@ export default function PPTInterface() {
         </div>
         <div className="flex items-center gap-2 flex-wrap">
           <div className="relative">
-            <select className="appearance-none pl-10 pr-10 py-2.5 rounded-lg border border-slate-200 bg-white text-sm outline-none focus:border-primary-300 focus:ring-2 focus:ring-primary-500/20">
-              <option>📄 FlashAttention-3 Proposal (8 sources)</option>
-              <option>📄 TruthSeeker Bench paper</option>
-              <option>📁 Select another paper...</option>
+            <select value={selectedPaperId} onChange={(e) => setSelectedPaperId(e.target.value)} className="appearance-none pl-10 pr-10 py-2.5 rounded-lg border border-slate-200 bg-white text-sm outline-none focus:border-primary-300 focus:ring-2 focus:ring-primary-500/20">
+              {availablePapers.length ? availablePapers.map((paper) => <option key={paper.id} value={paper.id}>📄 {paper.filename}</option>) : <option value="">No uploaded papers</option>}
             </select>
             <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
               <svg className="w-4 h-4 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -201,6 +224,8 @@ export default function PPTInterface() {
           </div>
         </div>
       </div>
+
+      {generationError && <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700">{generationError}</p>}
 
       {generating && (
         <div className="rounded-xl border border-primary-200 bg-gradient-to-r from-primary-50 via-white to-accent-50 p-4">
@@ -525,6 +550,14 @@ export default function PPTInterface() {
                         </div>
                       ))}
                     </div>
+                  </div>
+                )}
+
+                {slide.type === "generated" && (
+                  <div className="flex h-full flex-col">
+                    <div className="mb-4 border-b-2 border-slate-100 pb-3"><span className="text-xs font-black uppercase tracking-wider text-primary-600">Source page {slide.page || "citations available"}</span><h2 className="mt-1 text-3xl font-black text-slate-900">{slide.title}</h2></div>
+                    <ul className="flex-1 space-y-3 overflow-auto">{slide.bullets.map((bullet, i) => <li key={i} className="rounded-xl border border-slate-100 bg-white/80 p-3 text-base font-medium text-slate-800">{bullet}</li>)}</ul>
+                    <label className="mt-3 block text-xs font-black uppercase tracking-wider text-primary-700">Presenter notes<textarea value={slide.speakerNotes} onChange={(e) => setSlides((existing) => existing.map((item, i) => i === current ? { ...item, speakerNotes: e.target.value } : item))} onBlur={(e) => savePresenterNotes(e.target.value)} rows={3} placeholder="Add notes to present with this slide…" className="mt-1 w-full rounded-lg border border-primary-200 bg-white p-3 text-sm font-normal normal-case tracking-normal text-slate-800 outline-none focus:ring-2 focus:ring-primary-200" /></label>
                   </div>
                 )}
               </div>

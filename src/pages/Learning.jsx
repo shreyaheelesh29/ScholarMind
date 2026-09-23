@@ -1,4 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { apiFetch } from "../api";
+import ArtifactGenerator from "../components/research/ArtifactGenerator";
 
 const flashcards = [
   { id: 1, front: "What is the formula for scaled dot-product attention?", back: "Attention(Q,K,V) = softmax(QK^T / √d_k) × V" },
@@ -49,6 +51,29 @@ const quizQuestions = [
 ];
 
 export default function Learning() {
+  const [availablePapers, setAvailablePapers] = useState([]);
+  const [selectedPaperId, setSelectedPaperId] = useState("");
+  const [generatedCards, setGeneratedCards] = useState([]);
+  const [generatedMindmap, setGeneratedMindmap] = useState(null);
+  const [generating, setGenerating] = useState(false);
+  const [generationError, setGenerationError] = useState("");
+  useEffect(() => {
+    apiFetch("/papers").then(({ papers }) => {
+      setAvailablePapers(papers);
+      if (papers.length) setSelectedPaperId(papers[0].id);
+    }).catch((err) => setGenerationError(err.message));
+  }, []);
+  const generateFromPaper = async (kind) => {
+    if (!selectedPaperId) { setGenerationError("Upload a paper first, then choose it here."); return; }
+    setGenerating(true); setGenerationError("");
+    try {
+      const result = await apiFetch("/learning/generate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind, paper_id: selectedPaperId, count: 8 }) });
+      const payload = result.artifact.payload || {};
+      if (kind === "flashcards") { setGeneratedCards(payload.cards || []); setTab("cards"); setCardIdx(0); }
+      if (kind === "mindmap") { setGeneratedMindmap(payload); setTab("map"); }
+    } catch (err) { setGenerationError(err.message); }
+    finally { setGenerating(false); }
+  };
   const [tab, setTab] = useState("cards");
   const [cardIdx, setCardIdx] = useState(0);
   const [flipped, setFlipped] = useState(false);
@@ -79,7 +104,7 @@ export default function Learning() {
     setAnswers(Array(quizQuestions.length).fill(null));
   };
 
-  const mindmapNodes = [
+  const demoMindmapNodes = [
     { id: "center", label: "Transformer", x: 50, y: 50, color: "from-primary-500 to-accent-500", size: "lg" },
     { id: "enc", label: "Encoder", x: 20, y: 30, color: "from-primary-400 to-primary-600", size: "md" },
     { id: "dec", label: "Decoder", x: 80, y: 30, color: "from-accent-400 to-accent-600", size: "md" },
@@ -91,12 +116,15 @@ export default function Learning() {
     { id: "res", label: "Residual + LN", x: 50, y: 20, color: "from-slate-400 to-slate-600", size: "sm" },
   ];
 
-  const mindmapEdges = [
+  const demoMindmapEdges = [
     ["center", "enc"], ["center", "dec"],
     ["center", "pos"], ["center", "res"],
     ["enc", "attn"], ["enc", "ffn"],
     ["dec", "mask"], ["dec", "cross"],
   ];
+  const visibleCards = generatedCards.length ? generatedCards.map((card, i) => ({ id: i + 1, front: card.front || card.question || card.title || "Study prompt", back: card.back || card.answer || card.content || "No answer supplied" })) : flashcards;
+  const mindmapNodes = generatedMindmap?.nodes?.length ? generatedMindmap.nodes.map((node, i) => ({ id: node.id || `node-${i}`, label: node.label || node.title || "Topic", x: i === 0 ? 50 : 15 + ((i * 29) % 75), y: i === 0 ? 50 : 15 + ((i * 37) % 75), color: i === 0 ? "from-primary-500 to-accent-500" : "from-primary-300 to-primary-600", size: i === 0 ? "lg" : "sm" })) : demoMindmapNodes;
+  const mindmapEdges = generatedMindmap?.edges?.length ? generatedMindmap.edges.map(edge => [edge.source, edge.target]) : demoMindmapEdges;
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -106,9 +134,21 @@ export default function Learning() {
         <p className="mt-2 text-slate-500">Reinforce understanding with flashcards, quizzes, and interactive mind maps.</p>
       </div>
 
+      <div className="flex flex-wrap items-center gap-3 rounded-xl border border-slate-200 bg-white p-4">
+        <label className="text-sm font-semibold text-slate-700" htmlFor="study-paper">Generate from paper</label>
+        <select id="study-paper" value={selectedPaperId} onChange={(e) => setSelectedPaperId(e.target.value)} className="min-w-64 rounded-lg border border-slate-200 px-3 py-2 text-sm" disabled={!availablePapers.length}>
+          {availablePapers.length ? availablePapers.map((paper) => <option key={paper.id} value={paper.id}>{paper.filename}</option>) : <option value="">No uploaded papers</option>}
+        </select>
+        <button onClick={() => generateFromPaper("flashcards")} disabled={generating || !selectedPaperId} className="rounded-lg bg-primary-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">{generating ? "Generating…" : "Generate flashcards"}</button>
+        <button onClick={() => generateFromPaper("mindmap")} disabled={generating || !selectedPaperId} className="rounded-lg border border-primary-200 px-4 py-2 text-sm font-semibold text-primary-700 disabled:opacity-50">Generate mind map</button>
+        {generationError && <p className="w-full text-sm text-red-600">{generationError}</p>}
+      </div>
+
+      <ArtifactGenerator kinds={["quiz", "visualization"]} heading="Generate a source-based quiz or visualization outline" />
+
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
         {[
-          { l: "Flashcards Mastered", v: `${Math.round((cardIdx / flashcards.length) * 100)}%`, sub: `${cardIdx} of ${flashcards.length}`, i: "🃏" },
+          { l: "Flashcards Mastered", v: `${Math.round((cardIdx / visibleCards.length) * 100)}%`, sub: `${cardIdx} of ${visibleCards.length}`, i: "🃏" },
           { l: "Quiz Score", v: `${score}/${quizQuestions.length}`, sub: quizDone ? "Complete" : "In progress", i: "✅" },
           { l: "Mind Map Topics", v: mindmapNodes.length, sub: "Key concepts linked", i: "🗺" },
           { l: "Study Time", v: "2h 14m", sub: "This week", i: "⏱" },
@@ -141,9 +181,9 @@ export default function Learning() {
       {tab === "cards" && (
         <div className="max-w-3xl mx-auto space-y-6">
           <div className="text-center">
-            <p className="text-xs font-black uppercase tracking-wider text-slate-400">Card {cardIdx + 1} of {flashcards.length}</p>
+            <p className="text-xs font-black uppercase tracking-wider text-slate-400">Card {cardIdx + 1} of {visibleCards.length}</p>
             <div className="mt-3 h-2 w-full max-w-md mx-auto bg-slate-100 rounded-full overflow-hidden">
-              <div className="h-full bg-gradient-to-r from-primary-500 to-accent-500 rounded-full transition-all" style={{ width: `${((cardIdx + 1) / flashcards.length) * 100}%` }} />
+              <div className="h-full bg-gradient-to-r from-primary-500 to-accent-500 rounded-full transition-all" style={{ width: `${((cardIdx + 1) / visibleCards.length) * 100}%` }} />
             </div>
           </div>
 
@@ -151,12 +191,12 @@ export default function Learning() {
             <div className="absolute inset-0 transition-transform duration-700" style={{ transformStyle: "preserve-3d", transform: flipped ? "rotateY(180deg)" : "rotateY(0deg)" }}>
               <div className="absolute inset-0 rounded-3xl bg-gradient-to-br from-primary-500 via-primary-600 to-accent-500 p-10 flex flex-col items-center justify-center text-white shadow-2xl shadow-primary-500/40" style={{ backfaceVisibility: "hidden" }}>
                 <span className="text-xs font-black uppercase tracking-widest opacity-75 mb-4">Question</span>
-                <h3 className="text-3xl font-black text-center leading-tight max-w-lg">{flashcards[cardIdx].front}</h3>
+                <h3 className="text-3xl font-black text-center leading-tight max-w-lg">{visibleCards[cardIdx].front}</h3>
                 <p className="mt-8 text-sm opacity-75">Click to reveal answer →</p>
               </div>
               <div className="absolute inset-0 rounded-3xl bg-white border-2 border-primary-200 p-10 flex flex-col items-center justify-center shadow-2xl" style={{ backfaceVisibility: "hidden", transform: "rotateY(180deg)" }}>
                 <span className="text-xs font-black uppercase tracking-widest text-primary-500 mb-4">Answer</span>
-                <h3 className="text-2xl font-bold text-center text-slate-800 leading-relaxed max-w-lg">{flashcards[cardIdx].back}</h3>
+                <h3 className="text-2xl font-bold text-center text-slate-800 leading-relaxed max-w-lg">{visibleCards[cardIdx].back}</h3>
                 <p className="mt-8 text-xs text-slate-400">← Click to flip back</p>
               </div>
             </div>
@@ -175,7 +215,7 @@ export default function Learning() {
             <button className="px-5 py-3 rounded-xl bg-primary-50 text-primary-700 font-bold hover:bg-primary-100 transition flex items-center gap-1">
               ✅ Got It
             </button>
-            <button onClick={e => { e.stopPropagation(); setFlipped(false); setCardIdx(i => Math.min(flashcards.length - 1, i + 1)); }} disabled={cardIdx === flashcards.length - 1} className="px-6 py-3 rounded-xl bg-gradient-to-r from-primary-600 to-primary-500 text-white font-bold shadow-lg shadow-primary-500/25 hover:shadow-xl hover:shadow-primary-500/30 disabled:opacity-40 transition flex items-center gap-2">
+            <button onClick={e => { e.stopPropagation(); setFlipped(false); setCardIdx(i => Math.min(visibleCards.length - 1, i + 1)); }} disabled={cardIdx === visibleCards.length - 1} className="px-6 py-3 rounded-xl bg-gradient-to-r from-primary-600 to-primary-500 text-white font-bold shadow-lg shadow-primary-500/25 hover:shadow-xl hover:shadow-primary-500/30 disabled:opacity-40 transition flex items-center gap-2">
               Next →
             </button>
           </div>
@@ -265,7 +305,7 @@ export default function Learning() {
         <div className="rounded-2xl border border-slate-200 bg-gradient-to-br from-white via-slate-50 to-primary-50/30 overflow-hidden">
           <div className="p-5 border-b border-slate-200 bg-white flex items-center justify-between">
             <div>
-              <h3 className="font-black text-xl text-slate-900">Transformer Architecture Mind Map</h3>
+              <h3 className="font-black text-xl text-slate-900">{generatedMindmap ? "Generated Paper Mind Map" : "Transformer Architecture Mind Map"}</h3>
               <p className="text-sm text-slate-500">Click nodes to explore sub-topics • Drag canvas to pan (conceptual visualization)</p>
             </div>
             <div className="flex gap-1 p-1 rounded-lg bg-slate-100">

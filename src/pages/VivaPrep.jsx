@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from "react";
+import ArtifactGenerator from "../components/research/ArtifactGenerator";
 
 const questionBank = {
   Methodology: [
@@ -230,6 +231,7 @@ export default function VivaPrep() {
 
   return (
     <div className="space-y-6 animate-fade-in">
+      <ArtifactGenerator kinds={["viva"]} heading="Generate viva questions from an uploaded paper" />
       <div>
         <p className="text-sm font-medium text-primary-600">Output & Learning</p>
         <h1 className="mt-1 text-3xl font-bold text-slate-900">🎤 Viva Preparation</h1>

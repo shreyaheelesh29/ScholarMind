@@ -1,7 +1,8 @@
 import { useState, useRef, useEffect } from "react";
 
-export default function Citation({ number, paperTitle, authors, page, section, year }) {
+export default function Citation({ number, paperId, paperTitle, authors, page, section, year, excerpt }) {
   const [open, setOpen] = useState(false);
+  const [error, setError] = useState("");
   const popoverRef = useRef(null);
   const badgeRef = useRef(null);
 
@@ -19,6 +20,32 @@ export default function Citation({ number, paperTitle, authors, page, section, y
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
+
+  const viewSource = async () => {
+    const tab = window.open("about:blank", "_blank");
+    if (tab) tab.opener = null;
+    try {
+      const response = await fetch(`/api/papers/${paperId}/file`, {
+        headers: { Authorization: `Bearer ${localStorage.getItem("scholarmind_token") || ""}` },
+      });
+      if (!response.ok) throw new Error("Could not open this source paper");
+      const url = URL.createObjectURL(await response.blob());
+      if (tab) tab.location.href = `${url}#page=${page || 1}`;
+      window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch (err) {
+      if (tab) tab.close();
+      setError(err.message);
+    }
+  };
+
+  const copyCitation = async () => {
+    try {
+      await navigator.clipboard.writeText(`${paperTitle || "Source paper"}, p. ${page || "?"}${excerpt ? `\n\n${excerpt}` : ""}`);
+      setError("Citation copied");
+    } catch {
+      setError("Could not copy citation");
+    }
+  };
 
   return (
     <span className="relative inline-flex items-center">
@@ -47,6 +74,9 @@ export default function Citation({ number, paperTitle, authors, page, section, y
                 <p className="text-sm font-bold text-white mt-0.5">Citation [{number}]</p>
               </div>
             </div>
+
+            {excerpt && <div className="rounded-lg border border-primary-100 bg-primary-50/60 p-3"><p className="text-[11px] font-semibold uppercase tracking-wider text-primary-700">Retrieved passage</p><p className="mt-1 max-h-28 overflow-auto text-xs leading-relaxed text-slate-700">{excerpt}</p></div>}
+            {error && <p className="text-xs text-slate-500">{error}</p>}
           </div>
 
           <div className="p-4 space-y-3">
@@ -91,14 +121,14 @@ export default function Citation({ number, paperTitle, authors, page, section, y
           </div>
 
           <div className="px-4 py-3 bg-slate-50 border-t border-slate-100 flex items-center justify-between">
-            <button className="flex items-center gap-1.5 text-xs font-semibold text-primary-600 hover:text-primary-700 transition">
+            <button onClick={viewSource} className="flex items-center gap-1.5 text-xs font-semibold text-primary-600 hover:text-primary-700 transition">
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
               </svg>
               View in PDF
             </button>
-            <button className="flex items-center gap-1.5 text-xs font-medium text-slate-500 hover:text-slate-700 transition">
+            <button onClick={copyCitation} className="flex items-center gap-1.5 text-xs font-medium text-slate-500 hover:text-slate-700 transition">
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
               </svg>

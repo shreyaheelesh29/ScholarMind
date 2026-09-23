@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
+import ArtifactGenerator from "../components/research/ArtifactGenerator";
 
 const keyInsights = [
   {
@@ -63,7 +64,6 @@ const futureWork = [
 export default function PaperSummary() {
   const navigate = useNavigate();
   const [selectedPaper, setSelectedPaper] = useState("transformer");
-  const [regenerating, setRegenerating] = useState(false);
   const [copied, setCopied] = useState(false);
 
   const papers = [
@@ -78,8 +78,7 @@ export default function PaperSummary() {
   };
 
   const handleRegenerate = () => {
-    setRegenerating(true);
-    setTimeout(() => setRegenerating(false), 2000);
+    document.getElementById("paper-summary-generator")?.scrollIntoView({ behavior: "smooth", block: "center" });
   };
 
   const insightColorMap = {
@@ -115,6 +114,8 @@ export default function PaperSummary() {
           <option value="resnet">Deep Residual Learning for Image Recognition</option>
         </select>
       </div>
+
+      <ArtifactGenerator id="paper-summary-generator" kinds={["summary", "report"]} heading="Generate a summary or report from an uploaded paper" />
 
       <div className="rounded-2xl border border-slate-200 bg-gradient-to-br from-primary-50/50 via-white to-accent-50/40 p-6 shadow-sm">
         <div className="flex items-start gap-5">
@@ -169,7 +170,7 @@ export default function PaperSummary() {
             >
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
             </svg>
-            {regenerating ? "Regenerating..." : "Regenerate"}
+            Generate from my paper
           </button>
           <button className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg border-2 border-slate-200 text-slate-700 font-semibold text-sm hover:bg-slate-50 hover:border-slate-300 transition">
             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">

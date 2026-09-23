@@ -16,6 +16,8 @@ import PPTInterface from "./pages/PPTInterface";
 import VivaPrep from "./pages/VivaPrep";
 import Learning from "./pages/Learning";
 import Settings from "./pages/Settings";
+import MyData from "./pages/MyData";
+import Admin from "./pages/Admin";
 
 export default function App() {
   return (
@@ -150,6 +152,9 @@ export default function App() {
             </AppLayout>
           }
         />
+
+        <Route path="/my-data" element={<AppLayout><MyData /></AppLayout>} />
+        <Route path="/admin" element={<AppLayout><Admin /></AppLayout>} />
 
         <Route path="*" element={<Navigate to="/dashboard" replace />} />
       </Routes>

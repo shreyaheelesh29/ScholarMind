@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { apiFetch } from "../api";
 import UploadZone from "../components/papers/UploadZone";
 import Button from "../components/ui/Button";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "../components/ui/Card";
@@ -18,43 +19,28 @@ export default function UploadPaper() {
     }));
     setUploadedFiles((prev) => [...prev, ...newFiles]);
 
-    newFiles.forEach((nf) => {
-      simulateUpload(nf.id);
-    });
+    newFiles.forEach((nf) => uploadToBackend(nf));
   };
 
-  const simulateUpload = (id) => {
+  const uploadToBackend = async (upload) => {
     setUploading(true);
-    let progress = 0;
-    const interval = setInterval(() => {
-      progress += Math.random() * 20 + 5;
-      if (progress >= 100) {
-        progress = 100;
-        clearInterval(interval);
-        setUploadedFiles((prev) =>
-          prev.map((f) =>
-            f.id === id ? { ...f, progress: 100, status: "processing" } : f
-          )
-        );
-        setTimeout(() => {
-          setUploadedFiles((prev) =>
-            prev.map((f) =>
-              f.id === id ? { ...f, status: "processed" } : f
-            )
-          );
-          const remaining = uploadedFiles.filter(
-            (f) => f.id !== id && f.status !== "processed"
-          );
-          if (remaining.length === 0) setUploading(false);
-        }, 2000);
-      } else {
-        setUploadedFiles((prev) =>
-          prev.map((f) =>
-            f.id === id ? { ...f, progress, status: "uploading" } : f
-          )
-        );
-      }
-    }, 300);
+    setUploadedFiles((prev) => prev.map((f) =>
+      f.id === upload.id ? { ...f, progress: 25, status: "uploading" } : f
+    ));
+    try {
+      const body = new FormData();
+      body.append("file", upload.file);
+      const result = await apiFetch("/papers/upload", { method: "POST", body });
+      setUploadedFiles((prev) => prev.map((f) => f.id === upload.id ? {
+        ...f, paperId: result.paper_id, progress: 100, status: "processed", chunkCount: result.total_chunks
+      } : f));
+    } catch (error) {
+      setUploadedFiles((prev) => prev.map((f) =>
+        f.id === upload.id ? { ...f, status: "failed", error: error.message } : f
+      ));
+    } finally {
+      setUploading(false);
+    }
   };
 
   const removeFile = (id) => {
@@ -72,6 +58,7 @@ export default function UploadPaper() {
     uploading: { color: "bg-primary-100 text-primary-700", label: "Uploading" },
     processing: { color: "bg-warning-100 text-warning-700", label: "Processing" },
     processed: { color: "bg-success-100 text-success-700", label: "Ready" },
+    failed: { color: "bg-red-100 text-red-700", label: "Failed" },
   };
 
   return (

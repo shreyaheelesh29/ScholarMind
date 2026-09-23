@@ -1,54 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { Link } from "react-router-dom";
+import { apiFetch } from "../../api";
 import Citation from "./Citation";
-
-const chatSessions = [
-  { id: "c1", title: "Understanding Transformer Architecture", preview: "Can you explain the attention mechanism?", paper: "Attention Is All You Need", paperId: "p1", time: "2h ago", active: true },
-  { id: "c2", title: "BERT fine-tuning questions", preview: "How to fine-tune BERT on custom data?", paper: "BERT: Pre-training...", paperId: "p2", time: "Yesterday", active: false },
-  { id: "c3", title: "GAN comparison analysis", preview: "Compare DCGAN vs StyleGAN", paper: "Generative Adversarial Networks", paperId: "p3", time: "2 days ago", active: false },
-  { id: "c4", title: "ResNet skip connections", preview: "Why do residual connections work?", paper: "Deep Residual Learning...", paperId: "p4", time: "1 week ago", active: false },
-];
-
-const initialMessages = [
-  {
-    id: "m1",
-    role: "user",
-    content: "Can you explain the scaled dot-product attention mechanism in detail?",
-    time: "10:32 AM",
-  },
-  {
-    id: "m2",
-    role: "assistant",
-    content: "Great question! The **scaled dot-product attention** is the core component of the Transformer architecture. Here's how it works:\n\n1. **Inputs**: Three vectors - Query (Q), Key (K), and Value (V)\n2. **Dot Product**: Compute attention scores by multiplying Q and K^T\n3. **Scaling**: Divide by √d_k (where d_k is the dimension of K) to prevent small gradients\n4. **Softmax**: Apply softmax to get attention weights\n5. **Weighted Sum**: Multiply attention weights with V\n\nThe formula is:\nAttention(Q,K,V) = softmax(QK^T/√d_k) V\n\nThis mechanism allows the model to attend to different parts of the input sequence simultaneously.",
-    time: "10:32 AM",
-    citations: [
-      { number: 1, paperTitle: "Attention Is All You Need", authors: "Vaswani et al.", page: 4, section: "3.2.1 Scaled Dot-Product Attention", year: "2017" },
-      { number: 2, paperTitle: "Attention Is All You Need", authors: "Vaswani et al.", page: 5, section: "Figure 2: Attention Visualization", year: "2017" },
-    ],
-    sources: [
-      { type: "page", label: "Paper Page 4", page: 4 },
-      { type: "page", label: "Paper Page 5", page: 5 },
-    ],
-  },
-  {
-    id: "m3",
-    role: "user",
-    content: "Why is the scaling by 1/√d_k important?",
-    time: "10:33 AM",
-  },
-  {
-    id: "m4",
-    role: "assistant",
-    content: "The scaling factor **1/√d_k** is crucial for two main reasons:\n\n**1. Gradient Stability**: Without scaling, as d_k gets large, the dot products grow in magnitude, pushing the softmax function into regions where it has extremely small gradients. This causes training instability.\n\n**2. Normalized Distributions**: For Q and K components that are independent random variables with mean 0 and variance 1, their dot product has mean 0 and variance d_k. Scaling by 1/√d_k brings the variance back to 1, ensuring well-behaved softmax distributions.\n\n**Example**: If d_k = 512, then we scale by ~1/22.6. This prevents the largest logits from dominating the softmax output too aggressively.",
-    time: "10:33 AM",
-    citations: [
-      { number: 3, paperTitle: "Attention Is All You Need", authors: "Vaswani et al.", page: 4, section: "3.2.1 - Paragraph 2", year: "2017" },
-    ],
-    sources: [
-      { type: "page", label: "Paper Page 4", page: 4 },
-    ],
-  },
-];
 
 const renderContentWithCitations = (content, citations) => {
   if (!citations || citations.length === 0) {
@@ -75,11 +28,13 @@ const renderContentWithCitations = (content, citations) => {
         <Citation
           key={`c-${lastIndex}`}
           number={citation.number}
+          paperId={citation.paper_id}
           paperTitle={citation.paperTitle}
           authors={citation.authors}
           page={citation.page}
           section={citation.section}
           year={citation.year}
+          excerpt={citation.excerpt}
         />
       );
     } else {
@@ -104,16 +59,43 @@ const renderContentWithCitations = (content, citations) => {
 };
 
 export default function ChatWindow() {
-  const [messages, setMessages] = useState(initialMessages);
+  const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
-  const [selectedPaper, setSelectedPaper] = useState("Attention Is All You Need");
-  const [activeSession, setActiveSession] = useState("c1");
+  const [availablePapers, setAvailablePapers] = useState([]);
+  const [selectedPaperId, setSelectedPaperId] = useState("");
+  const selectedPaper = availablePapers.find((paper) => paper.id === selectedPaperId)?.filename || "All your papers";
+  const [sessions, setSessions] = useState([]);
+  const [activeSession, setActiveSession] = useState(null);
+  const [historyError, setHistoryError] = useState("");
   const [isTyping, setIsTyping] = useState(false);
   const [selectedModel, setSelectedModel] = useState("ScholarMind Pro");
   const [showModelDropdown, setShowModelDropdown] = useState(false);
   const messagesEndRef = useRef(null);
   const textareaRef = useRef(null);
   const modelDropdownRef = useRef(null);
+
+  const refreshChats = async () => {
+    try { const result = await apiFetch("/chats"); setSessions(result.chats); }
+    catch (error) { setHistoryError(error.message); }
+  };
+
+  useEffect(() => {
+    apiFetch("/papers").then(({ papers }) => setAvailablePapers(papers)).catch((error) => setHistoryError(error.message));
+    refreshChats();
+  }, []);
+
+  const openChat = async (session) => {
+    try {
+      const { chat } = await apiFetch(`/chats/${session.id}`);
+      setActiveSession(chat.id);
+      setSelectedPaperId(chat.paper_id || "");
+      setMessages(chat.messages.map((message) => ({
+        id: `m-${message.id}`, role: message.role, content: message.content,
+        time: new Date(message.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+        citations: message.citations, sources: message.sources,
+      })));
+    } catch (error) { setHistoryError(error.message); }
+  };
 
   const models = [
     { id: "sm-pro", name: "ScholarMind Pro", description: "Best for deep research analysis", badge: "Recommended" },
@@ -146,7 +128,7 @@ export default function ChatWindow() {
     }
   }, [input]);
 
-  const handleSend = () => {
+  const handleSend = async () => {
     if (!input.trim()) return;
     const userMsg = {
       id: `u-${Date.now()}`,
@@ -154,33 +136,45 @@ export default function ChatWindow() {
       content: input,
       time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
     };
-    setMessages([...messages, userMsg]);
+    setMessages((current) => [...current, userMsg]);
     setInput("");
     setIsTyping(true);
-    setTimeout(() => {
+    try {
+      const result = await apiFetch("/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question: userMsg.content, session_id: activeSession, paper_ids: selectedPaperId ? [selectedPaperId] : null }),
+      });
+      setActiveSession(result.session_id);
       const aiMsg = {
         id: `a-${Date.now()}`,
         role: "assistant",
-        content: `Great question! Here's my detailed response based on the paper:\n\n**Key Insight**: The multi-head attention allows the model to jointly attend to information from different representation subspaces at different positions. With a single attention head, averaging inhibits this.\n\n**Technical Details**:\n- The paper uses h = 8 parallel attention heads [1]\n- Each head has dimension d_k = d_v = d_model/h = 64 (for d_model=512)\n- Outputs are concatenated and linearly projected\n\nThis parallel processing gives Transformer models their expressive power while maintaining computational efficiency compared to recurrent architectures [2].`,
+        content: result.answer,
         time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-        citations: [
-          { number: 1, paperTitle: "Attention Is All You Need", authors: "Vaswani et al.", page: 5, section: "3.2.2 Multi-Head Attention", year: "2017" },
-          { number: 2, paperTitle: "Attention Is All You Need", authors: "Vaswani et al.", page: 6, section: "Table 1: Model Variations", year: "2017" },
-        ],
-        sources: [
-          { type: "page", label: "Paper Page 5", page: 5 },
-          { type: "page", label: "Paper Page 6", page: 6 },
-        ],
+        citations: result.citations,
+        sources: result.sources,
       };
       setMessages((m) => [...m, aiMsg]);
+      refreshChats();
+    } catch (error) {
+      setMessages((m) => [...m, {
+        id: `e-${Date.now()}`, role: "assistant",
+        content: `I couldn't reach the ScholarMind backend: ${error.message}`,
+        time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+      }]);
+    } finally {
       setIsTyping(false);
-    }, 1500);
+    }
   };
 
   const handleNewChat = () => {
     setMessages([]);
     setInput("");
+    setActiveSession(null);
+    setHistoryError("");
   };
+
+  const activeTitle = sessions.find((session) => session.id === activeSession)?.title || "New Research Chat";
 
   return (
     <div className="h-full flex gap-0 animate-fade-in">
@@ -202,14 +196,12 @@ export default function ChatWindow() {
             Context Paper
           </label>
           <select
-            value={selectedPaper}
-            onChange={(e) => setSelectedPaper(e.target.value)}
+            value={selectedPaperId}
+            onChange={(e) => setSelectedPaperId(e.target.value)}
             className="w-full px-3 py-2 rounded-lg bg-slate-50 border border-slate-200 text-sm outline-none focus:border-primary-300 focus:ring-2 focus:ring-primary-500/20 text-slate-800"
           >
-            <option>Attention Is All You Need</option>
-            <option>BERT: Pre-training of Deep Bidirectional Transformers</option>
-            <option>Deep Residual Learning for Image Recognition</option>
-            <option>Generative Adversarial Networks</option>
+            <option value="">All your papers</option>
+            {availablePapers.map((paper) => <option key={paper.id} value={paper.id}>{paper.filename}</option>)}
           </select>
         </div>
 
@@ -217,10 +209,11 @@ export default function ChatWindow() {
           <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-400 px-2 py-2">
             Recent Chats
           </p>
-          {chatSessions.map((s) => (
+          {historyError && <p className="px-2 py-1 text-xs text-red-600">{historyError}</p>}
+          {sessions.map((s) => (
             <button
               key={s.id}
-              onClick={() => setActiveSession(s.id)}
+              onClick={() => openChat(s)}
               className={`w-full p-3 rounded-lg text-left transition group ${
                 activeSession === s.id
                   ? "bg-primary-50 border border-primary-100"
@@ -234,10 +227,10 @@ export default function ChatWindow() {
               >
                 {s.title}
               </p>
-              <p className="text-xs text-slate-500 mt-0.5 truncate">{s.preview}</p>
+              <p className="text-xs text-slate-500 mt-0.5 truncate">{s.preview || "No messages yet"}</p>
               <div className="flex items-center justify-between mt-2 text-[10px] text-slate-400">
-                <span className="truncate max-w-[60%]">📄 {s.paper}</span>
-                <span>{s.time}</span>
+                <span className="truncate max-w-[60%]">📄 {availablePapers.find((paper) => paper.id === s.paper_id)?.filename || "All papers"}</span>
+                <span>{new Date(s.updated_at).toLocaleDateString()}</span>
               </div>
             </button>
           ))}
@@ -247,7 +240,7 @@ export default function ChatWindow() {
       <div className="flex-1 rounded-r-xl border border-slate-200 bg-white flex flex-col overflow-hidden">
         <div className="px-5 py-3.5 border-b border-slate-200 flex items-center gap-3">
           <div className="flex-1 min-w-0">
-            <h2 className="font-bold text-slate-900 truncate">Understanding Transformer Architecture</h2>
+            <h2 className="font-bold text-slate-900 truncate">{activeTitle}</h2>
             <p className="text-xs text-slate-500 truncate">
               Chatting about:{" "}
               <span className="font-medium text-primary-600">{selectedPaper}</span>

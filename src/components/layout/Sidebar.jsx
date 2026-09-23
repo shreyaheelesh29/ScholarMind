@@ -1,4 +1,5 @@
 import { NavLink } from "react-router-dom";
+import { getSessionUser } from "../../api";
 
 const navGroups = [
   {
@@ -141,6 +142,12 @@ const navGroups = [
 ];
 
 export default function Sidebar() {
+  const user = getSessionUser();
+  const accountItems = [
+    { to: "/my-data", label: "My Data & History", icon: <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16M8 6v12" /></svg> },
+    ...(user?.role === "admin" ? [{ to: "/admin", label: "Admin Records", icon: <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg> }] : []),
+  ];
+  const groups = [...navGroups, { label: "Account", items: accountItems }];
   return (
     <aside className="fixed inset-y-0 left-0 z-40 w-64 bg-white border-r border-slate-200 flex flex-col">
       <div className="h-16 flex items-center gap-3 px-6 border-b border-slate-200">
@@ -156,7 +163,7 @@ export default function Sidebar() {
       </div>
 
       <nav className="flex-1 overflow-y-auto py-4 px-3 space-y-6">
-        {navGroups.map((group) => (
+        {groups.map((group) => (
           <div key={group.label}>
             <p className="px-3 mb-2 text-xs font-semibold uppercase tracking-wider text-slate-400">
               {group.label}

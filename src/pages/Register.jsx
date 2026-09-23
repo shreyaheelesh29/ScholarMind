@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
+import { apiFetch, saveSession } from "../api";
 
 export default function Register() {
   const navigate = useNavigate();
@@ -18,7 +19,7 @@ export default function Register() {
     setFormData({ ...formData, [e.target.name]: e.target.value });
   };
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
     setError("");
 
@@ -30,8 +31,8 @@ export default function Register() {
       setError("Passwords do not match");
       return;
     }
-    if (formData.password.length < 6) {
-      setError("Password must be at least 6 characters");
+    if (formData.password.length < 8) {
+      setError("Password must be at least 8 characters");
       return;
     }
     if (!agree) {
@@ -40,10 +41,14 @@ export default function Register() {
     }
 
     setLoading(true);
-    setTimeout(() => {
-      setLoading(false);
+    apiFetch("/auth/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: formData.name, email: formData.email, password: formData.password, role: formData.role }),
+    }).then((result) => {
+      saveSession(result);
       navigate("/dashboard");
-    }, 1500);
+    }).catch((err) => setError(err.message)).finally(() => setLoading(false));
   };
 
   const roles = [
