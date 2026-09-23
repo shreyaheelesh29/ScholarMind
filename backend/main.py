@@ -6,11 +6,11 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-import fitz
+import pymupdf
 import psycopg
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
@@ -103,6 +103,20 @@ def health_check():
     return {"status": "ok", "message": "ScholarMind backend is running"}
 
 
+@app.get("/")
+def root():
+    return {
+        "message": "ScholarMind backend is running",
+        "docs": "/docs",
+        "health": "/api/health",
+    }
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    return Response(status_code=204)
+
+
 @app.post("/api/auth/register", status_code=201)
 def register(payload: RegisterRequest):
     email = payload.email.strip().lower()
@@ -191,7 +205,7 @@ async def upload_paper(file: UploadFile = File(...), user: dict[str, Any] = Depe
         file_path.unlink(missing_ok=True)
         raise HTTPException(status_code=413, detail="PDF must be 100 MB or smaller")
     try:
-        pdf, chunks, next_number = fitz.open(file_path), [], 1
+        pdf, chunks, next_number = pymupdf.open(file_path), [], 1
         for page_number, page in enumerate(pdf, start=1):
             page_chunks = chunk_text(page.get_text("text"), paper_id, page_number, start_number=next_number)
             chunks.extend(page_chunks)
