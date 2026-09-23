@@ -12,7 +12,14 @@ function OutputValue({ value }) {
   if (value == null || typeof value === "boolean") return null;
   if (typeof value === "string" || typeof value === "number") return <p className="whitespace-pre-wrap text-sm leading-relaxed text-slate-700">{String(value)}</p>;
   if (Array.isArray(value)) return <div className="space-y-3">{value.map((item, index) => <div key={index} className="rounded-lg border border-slate-100 bg-slate-50 p-3"><OutputValue value={item} /></div>)}</div>;
-  const entries = Object.entries(value).filter(([key, item]) => item != null && !["citations", "speaker_notes"].includes(key));
+  if (typeof value.question === "string" && Array.isArray(value.options)) {
+    return <article className="space-y-3 rounded-xl border border-indigo-100 bg-white p-4">
+      <div className="flex items-start justify-between gap-3"><h4 className="font-semibold leading-relaxed text-slate-900">{value.question}</h4>{value.page && <span className="shrink-0 rounded-full bg-indigo-50 px-2 py-1 text-xs text-indigo-700">p. {value.page}</span>}</div>
+      <ol className="space-y-2">{value.options.map((option, index) => <li key={index} className={`rounded-lg border px-3 py-2 text-sm ${Number(value.answer) === index ? "border-emerald-200 bg-emerald-50 text-emerald-900" : "border-slate-100 bg-slate-50 text-slate-700"}`}><span className="mr-2 font-semibold">{String.fromCharCode(65 + index)}.</span>{option}{Number(value.answer) === index && <span className="ml-2 text-xs font-semibold">Correct answer</span>}</li>)}</ol>
+      {value.explanation && <div className="rounded-lg bg-blue-50 p-3"><p className="text-xs font-semibold uppercase tracking-wide text-blue-700">Explanation</p><p className="mt-1 whitespace-pre-wrap text-sm leading-relaxed text-slate-700">{value.explanation}</p></div>}
+    </article>;
+  }
+  const entries = Object.entries(value).filter(([key, item]) => item != null && !["citations", "speaker_notes", "_generation_mode", "_generation_notice"].includes(key));
   return <div className="space-y-2">{entries.map(([key, item]) => <div key={key}><p className="mb-0.5 text-xs font-bold uppercase tracking-wide text-slate-500">{key.replaceAll("_", " ")}</p><OutputValue value={item} /></div>)}{value.speaker_notes && <div className="border-l-2 border-primary-300 pl-3"><p className="text-xs font-bold uppercase tracking-wide text-primary-700">Presenter notes</p><p className="mt-1 text-sm text-slate-700">{value.speaker_notes}</p></div>}</div>;
 }
 
@@ -59,6 +66,8 @@ export default function ArtifactGenerator({ kinds, heading = "Generate from your
     {error && <p role="alert" className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p>}
     {artifact && <div className="space-y-3 rounded-xl border border-slate-200 bg-white p-4">
       <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="font-bold text-slate-900">{artifact.title}</h3><Link to="/my-data" className="text-sm font-semibold text-indigo-700 hover:underline">View saved work</Link></div>
+      {artifact.payload?._generation_mode === "source_fallback" && <p role="status" className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-900">{artifact.payload._generation_notice || "Showing retrieved PDF passages because AI generation was unavailable."}</p>}
+      {artifact.payload?._generation_mode === "ai" && <p className="text-xs font-medium text-emerald-700">AI-generated from the selected paper</p>}
       <div className="max-h-[32rem] space-y-3 overflow-auto"><OutputValue value={artifact.payload} /></div>
       {artifact.payload?.citations?.length > 0 && <div className="border-t border-slate-100 pt-3"><p className="text-xs font-bold uppercase tracking-wide text-slate-500">Sources</p><div className="mt-1 flex flex-wrap gap-2">{artifact.payload.citations.map((citation) => <span key={`${citation.number}-${citation.paper_id}-${citation.page}`} className="rounded-full bg-indigo-50 px-2.5 py-1 text-xs text-indigo-800">{citation.paperTitle} · p. {citation.page}</span>)}</div></div>}
     </div>}

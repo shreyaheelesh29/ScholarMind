@@ -87,6 +87,8 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
 
     api_key = os.getenv("LLM_API_KEY")
     if not api_key:
+        fallback_data["_generation_mode"] = "source_fallback"
+        fallback_data["_generation_notice"] = "Gemini is not configured; this uses retrieved PDF passages only."
         return fallback_data
     base_url = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/")
     instruction = (f"Create {kind} for a student using only the provided sources. User focus: {prompt}. "
@@ -103,16 +105,25 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
         with urllib.request.urlopen(request, timeout=60) as response:
             content = json.loads(response.read())["choices"][0]["message"]["content"]
         if not isinstance(content, str) or not content.strip():
+            logger.warning("LLM study generation returned empty content; using retrieved paper content instead")
+            fallback_data["_generation_mode"] = "source_fallback"
+            fallback_data["_generation_notice"] = "Gemini returned no usable content; this uses retrieved PDF passages only."
             return fallback_data
         content = content.strip()
         start, end = content.find("{"), content.rfind("}")
         if start < 0 or end < start:
+            logger.warning("LLM study generation returned non-JSON content; using retrieved paper content instead")
+            fallback_data["_generation_mode"] = "source_fallback"
+            fallback_data["_generation_notice"] = "Gemini returned an unusable response; this uses retrieved PDF passages only."
             return fallback_data
         result = json.loads(content[start:end + 1])
         if not isinstance(result, dict):
             raise ValueError("Expected a JSON object")
+        result["_generation_mode"] = "ai"
         return result
     except Exception:
         # A model/provider response must not prevent source-based study material from being saved.
         logger.warning("LLM study generation failed; using retrieved paper content instead", exc_info=True)
+        fallback_data["_generation_mode"] = "source_fallback"
+        fallback_data["_generation_notice"] = "Gemini could not generate this material; this uses retrieved PDF passages only. Check the backend window for the reason."
         return fallback_data

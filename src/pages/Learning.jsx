@@ -57,6 +57,8 @@ export default function Learning() {
   const [generatedMindmap, setGeneratedMindmap] = useState(null);
   const [generating, setGenerating] = useState(false);
   const [generationError, setGenerationError] = useState("");
+  const [generationMode, setGenerationMode] = useState("");
+  const [generationNotice, setGenerationNotice] = useState("");
   useEffect(() => {
     apiFetch("/papers").then(({ papers }) => {
       setAvailablePapers(papers);
@@ -65,10 +67,12 @@ export default function Learning() {
   }, []);
   const generateFromPaper = async (kind) => {
     if (!selectedPaperId) { setGenerationError("Upload a paper first, then choose it here."); return; }
-    setGenerating(true); setGenerationError("");
+    setGenerating(true); setGenerationError(""); setGenerationMode(""); setGenerationNotice("");
     try {
       const result = await apiFetch("/learning/generate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind, paper_id: selectedPaperId, count: 8 }) });
       const payload = result.artifact.payload || {};
+      setGenerationMode(payload._generation_mode || "");
+      setGenerationNotice(payload._generation_notice || "");
       if (kind === "flashcards") { setGeneratedCards(payload.cards || []); setTab("cards"); setCardIdx(0); }
       if (kind === "mindmap") { setGeneratedMindmap(payload); setTab("map"); }
     } catch (err) { setGenerationError(err.message); }
@@ -142,6 +146,8 @@ export default function Learning() {
         <button onClick={() => generateFromPaper("flashcards")} disabled={generating || !selectedPaperId} className="rounded-lg bg-primary-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">{generating ? "Generating…" : "Generate flashcards"}</button>
         <button onClick={() => generateFromPaper("mindmap")} disabled={generating || !selectedPaperId} className="rounded-lg border border-primary-200 px-4 py-2 text-sm font-semibold text-primary-700 disabled:opacity-50">Generate mind map</button>
         {generationError && <p className="w-full text-sm text-red-600">{generationError}</p>}
+        {generationMode === "source_fallback" && <p role="status" className="w-full rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-900">{generationNotice || "Gemini was unavailable; this material uses retrieved PDF passages only."}</p>}
+        {generationMode === "ai" && <p className="w-full text-sm font-medium text-emerald-700">AI-generated from the selected PDF.</p>}
       </div>
 
       <ArtifactGenerator kinds={["quiz", "visualization"]} heading="Generate a source-based quiz or visualization outline" />
@@ -189,14 +195,18 @@ export default function Learning() {
 
           <div onClick={() => setFlipped(!flipped)} className="relative h-80 cursor-pointer group" style={{ perspective: "1500px" }}>
             <div className="absolute inset-0 transition-transform duration-700" style={{ transformStyle: "preserve-3d", transform: flipped ? "rotateY(180deg)" : "rotateY(0deg)" }}>
-              <div className="absolute inset-0 rounded-3xl bg-gradient-to-br from-primary-500 via-primary-600 to-accent-500 p-10 flex flex-col items-center justify-center text-white shadow-2xl shadow-primary-500/40" style={{ backfaceVisibility: "hidden" }}>
+              <div className="absolute inset-0 flex flex-col items-center justify-center overflow-hidden rounded-3xl bg-gradient-to-br from-primary-500 via-primary-600 to-accent-500 p-6 text-white shadow-2xl shadow-primary-500/40 sm:p-8" style={{ backfaceVisibility: "hidden" }}>
                 <span className="text-xs font-black uppercase tracking-widest opacity-75 mb-4">Question</span>
-                <h3 className="text-3xl font-black text-center leading-tight max-w-lg">{visibleCards[cardIdx].front}</h3>
+                <div className="max-h-44 w-full max-w-lg overflow-y-auto px-2" onClick={(event) => event.stopPropagation()}>
+                  <h3 className="break-words text-center text-lg font-black leading-snug sm:text-2xl">{visibleCards[cardIdx].front}</h3>
+                </div>
                 <p className="mt-8 text-sm opacity-75">Click to reveal answer →</p>
               </div>
-              <div className="absolute inset-0 rounded-3xl bg-white border-2 border-primary-200 p-10 flex flex-col items-center justify-center shadow-2xl" style={{ backfaceVisibility: "hidden", transform: "rotateY(180deg)" }}>
+              <div className="absolute inset-0 flex flex-col items-center justify-center overflow-hidden rounded-3xl border-2 border-primary-200 bg-white p-6 shadow-2xl sm:p-8" style={{ backfaceVisibility: "hidden", transform: "rotateY(180deg)" }}>
                 <span className="text-xs font-black uppercase tracking-widest text-primary-500 mb-4">Answer</span>
-                <h3 className="text-2xl font-bold text-center text-slate-800 leading-relaxed max-w-lg">{visibleCards[cardIdx].back}</h3>
+                <div className="max-h-44 w-full max-w-lg overflow-y-auto px-2" onClick={(event) => event.stopPropagation()}>
+                  <h3 className="break-words text-center text-base font-semibold leading-relaxed text-slate-800 sm:text-lg">{visibleCards[cardIdx].back}</h3>
+                </div>
                 <p className="mt-8 text-xs text-slate-400">← Click to flip back</p>
               </div>
             </div>
