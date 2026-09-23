@@ -9,6 +9,7 @@ from typing import Any, Iterator
 
 import psycopg
 from dotenv import load_dotenv
+from pgvector import Vector
 from pgvector.psycopg import register_vector
 from psycopg.types.json import Jsonb
 
@@ -280,7 +281,7 @@ def hybrid_search(query: str, query_embedding: list[float], paper_ids: list[str]
                   owner_id: str | None = None) -> list[dict[str, Any]]:
     filter_sql = "AND c.paper_id = ANY(%(paper_ids)s::uuid[])" if paper_ids else ""
     owner_filter = "AND p.owner_id = %(owner_id)s::uuid" if owner_id else ""
-    params: dict[str, Any] = {"query": query, "embedding": query_embedding, "limit": limit}
+    params: dict[str, Any] = {"query": query, "embedding": Vector(query_embedding), "limit": limit}
     if paper_ids: params["paper_ids"] = paper_ids
     if owner_id: params["owner_id"] = owner_id
     sql = f"""WITH vector_hits AS (
