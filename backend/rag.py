@@ -92,10 +92,17 @@ def _chat_request(base_url: str, model: str, messages: list[dict[str, str]], tim
     """Call local Ollama natively, or use the configured provider's OpenAI-compatible API."""
     if _is_local_ollama(base_url):
         root_url = base_url.removesuffix("/v1").rstrip("/")
+        # A smaller context reduces memory use and prompt-evaluation work on
+        # CPU-only laptops. Keep the model resident so each study tool does not
+        # pay the cold-load cost again immediately after the first request.
+        try:
+            num_ctx = max(1024, int(os.getenv("OLLAMA_NUM_CTX", "2048")))
+        except ValueError:
+            num_ctx = 2048
         body: dict[str, Any] = {
             "model": model, "messages": messages, "stream": False,
-            "think": False, "keep_alive": "5m",
-            "options": {"temperature": temperature, "num_predict": max_tokens},
+            "think": False, "keep_alive": os.getenv("OLLAMA_KEEP_ALIVE", "30m"),
+            "options": {"temperature": temperature, "num_predict": max_tokens, "num_ctx": num_ctx},
         }
         if json_schema is not None:
             body["format"] = json_schema
@@ -235,8 +242,8 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
     base_url = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/")
     local_ollama = _is_local_ollama(base_url)
     compact_study_kind = kind in {"flashcards", "mindmap", "quiz"}
-    generation_count = min(count, 5) if local_ollama and compact_study_kind else min(count, 10)
-    source_hits = hits[:5] if local_ollama and compact_study_kind else hits
+    generation_count = min(count, 3) if local_ollama and compact_study_kind else min(count, 10)
+    source_hits = hits[:3] if local_ollama and compact_study_kind else hits
     if kind == "mindmap":
         shared = (f"Use only the supplied paper passages. Focus requested: {prompt}. "
                   "Return one root plus four to six distinct concepts, with meaningful labeled links. "
@@ -247,8 +254,8 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
                   "Each page must be one of the page numbers shown in the sources. If evidence is insufficient, omit the item. "
                   "Do not copy a passage verbatim as a question; paraphrase and test understanding. Return JSON only, with no markdown.")
     task_instructions = {
-        "quiz": "Create multiple-choice questions that test distinct, important concepts from this paper. Every question must be answerable from the cited passage. Provide exactly four different, plausible options; exactly one is correct. `answer` is the zero-based index (0-3) of that correct option. Explanation must justify the answer using the paper, not merely repeat the answer.",
-        "flashcards": "Create study flashcards, one concept per card. `front` must be a direct, self-contained question. `back` must state the correct answer concisely in your own words, adding a key detail only when supported. Avoid vague prompts and duplicated concepts.",
+        "quiz": "Create multiple-choice questions that test distinct, important concepts from this paper. Every question must be answerable from the cited passage. Provide exactly four different, plausible options; exactly one is correct. `answer` is the zero-based index (0-3) of that correct option. Explain the answer in one short sentence grounded in the paper.",
+        "flashcards": "Create study flashcards, one concept per card. `front` must be a direct, self-contained question. `back` must state the correct answer in one concise sentence, adding a key detail only when supported. Avoid vague prompts and duplicated concepts.",
         "mindmap": "Return a complete map, never only a title or root: exactly one root plus at least four distinct, paper-specific concepts and four or more labeled links. Use concise concept labels of 2-8 words, using terminology actually present in the passages. Do not add page or quote fields; those are matched to the source by the application. Every node must connect to the root.",
         "comparison": "Compare only the selected papers represented in SOURCES. Cover shared and differing objectives, methods, data/evaluation, results, and limitations where the text supports them. Each paper_findings entry must name the exact source filename and page. Do not invent scores or rank papers; state when a criterion is not reported.",
         "literature_review": "Write a concise thematic synthesis across the selected uploaded papers, not a list of summaries. Each section must cite the exact filenames and page numbers that support it. Describe agreements, disagreements, and trends only when the supplied passages support them. Do not cite papers absent from SOURCES.",
@@ -264,9 +271,10 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
         "comparison": 1600, "research_gap": 1500, "research_ideas": 1700,
     }
     if local_ollama:
-        # Smaller JSON responses materially reduce decode time for local Qwen-sized models.
-        generation_tokens.update({"flashcards": 650, "mindmap": 450, "quiz": 900})
-    context_chars = (850 if local_ollama else 1300) if kind in {"flashcards", "mindmap", "quiz", "visualization", "viva"} else 1800
+        # CPU-bound local models decode slowly. Three concise, source-grounded
+        # items keep normal study-tool requests within a practical wait time.
+        generation_tokens.update({"flashcards": 320, "mindmap": 450, "quiz": 480})
+    context_chars = (500 if local_ollama else 1300) if kind in {"flashcards", "mindmap", "quiz", "visualization", "viva"} else 1800
     messages = [
             {"role": "system", "content": "You are a precise academic learning assistant. Use only supplied source passages and return valid JSON."},
             {"role": "user", "content": f"{instruction}\n\nSOURCES:\n{_context(source_hits, max_chars=context_chars)}"}
@@ -510,7 +518,7 @@ def _generation_failure_reason(exc: Exception, api_key: str, base_url: str, mode
     provider = f"Local Ollama ({model})" if local_ollama else f"AI provider ({model})"
     if isinstance(exc, (TimeoutError, socket.timeout)):
         if local_ollama:
-            return f"{provider} took too long to respond. Its first run can be slow; try again after the model is warm, or request fewer items."
+            return f"{provider} exceeded the 120-second response limit. Local CPU inference is slow; retry after it is warm or use a smaller model such as qwen3:1.7b."
         return f"{provider} timed out. Check your connection and try again."
     if isinstance(exc, urllib.error.HTTPError):
         if exc.code == 503:
