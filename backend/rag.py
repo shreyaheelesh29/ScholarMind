@@ -87,14 +87,13 @@ def _chat_request(base_url: str, model: str, messages: list[dict[str, str]], tim
 
 
 def _mindmap_schema() -> dict[str, Any]:
-    """Constrain local Ollama to a useful map shape before validating source evidence."""
+    """Constrain local Ollama to a useful map shape; source citations are attached locally."""
     node = {
         "type": "object",
         "properties": {
             "id": {"type": "string"}, "label": {"type": "string"},
-            "page": {"type": "integer"}, "evidence": {"type": "string"},
         },
-        "required": ["id", "label", "page", "evidence"],
+        "required": ["id", "label"],
         "additionalProperties": False,
     }
     edge = {
@@ -153,7 +152,7 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
         shape = '{"cards":[{"front":"A focused question testing one concept","back":"A concise, accurate answer supported by the paper","page":1}]}'
     elif kind == "mindmap":
         fallback_data = {"nodes": [], "edges": []}
-        shape = '{"nodes":[{"id":"root","label":"Paper central topic","page":1,"evidence":"Exact quote copied from page 1"},{"id":"concept-1","label":"Specific concept one","page":1,"evidence":"Exact quote copied from page 1"},{"id":"concept-2","label":"Specific concept two","page":2,"evidence":"Exact quote copied from page 2"},{"id":"concept-3","label":"Specific concept three","page":3,"evidence":"Exact quote copied from page 3"},{"id":"concept-4","label":"Specific concept four","page":4,"evidence":"Exact quote copied from page 4"}],"edges":[{"source":"root","target":"concept-1","label":"includes"},{"source":"root","target":"concept-2","label":"explains"},{"source":"root","target":"concept-3","label":"uses"},{"source":"root","target":"concept-4","label":"evaluates"}]}'
+        shape = '{"nodes":[{"id":"root","label":"Paper central topic"},{"id":"concept-1","label":"Important concept one"},{"id":"concept-2","label":"Important concept two"},{"id":"concept-3","label":"Important concept three"},{"id":"concept-4","label":"Important concept four"}],"edges":[{"source":"root","target":"concept-1","label":"includes"},{"source":"root","target":"concept-2","label":"explains"},{"source":"root","target":"concept-3","label":"uses"},{"source":"root","target":"concept-4","label":"evaluates"}]}'
     elif kind == "quiz":
         fallback_data = {"questions": []}
         shape = '{"questions":[{"question":"A clear question testing understanding, not a copied sentence","options":["Plausible answer A","Plausible answer B","Plausible answer C","Plausible answer D"],"answer":0,"explanation":"Why this is correct, grounded in the paper","page":1}]}'
@@ -171,13 +170,19 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
             if kind in {"quiz", "flashcards", "mindmap"} else "AI generation is not configured. This is extracted source material, not a generated " + kind.replace("_", " ") + ".")
         return fallback_data
     base_url = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/")
-    shared = (f"Use only the paper passages below. Focus requested: {prompt}. Generate up to {min(count, 10)} useful items. "
-              "Each page must be one of the page numbers shown in the sources. If evidence is insufficient, omit the item. "
-              "Do not copy a passage verbatim as a question; paraphrase and test understanding. Return JSON only, with no markdown.")
+    if kind == "mindmap":
+        shared = (f"Use only the supplied paper passages. Focus requested: {prompt}. "
+                  "Return one root plus four to six distinct concepts, with meaningful labeled links. "
+                  "Choose concise labels using the paper's own terminology. Return JSON only, with no markdown. "
+                  "Return only nodes with id and label, plus edges with source, target, and label; ScholarMind will attach page citations and exact evidence from the PDF.")
+    else:
+        shared = (f"Use only the paper passages below. Focus requested: {prompt}. Generate up to {min(count, 10)} useful items. "
+                  "Each page must be one of the page numbers shown in the sources. If evidence is insufficient, omit the item. "
+                  "Do not copy a passage verbatim as a question; paraphrase and test understanding. Return JSON only, with no markdown.")
     task_instructions = {
         "quiz": "Create multiple-choice questions that test distinct, important concepts from this paper. Every question must be answerable from the cited passage. Provide exactly four different, plausible options; exactly one is correct. `answer` is the zero-based index (0-3) of that correct option. Explanation must justify the answer using the paper, not merely repeat the answer.",
         "flashcards": "Create study flashcards, one concept per card. `front` must be a direct, self-contained question. `back` must state the correct answer concisely in your own words, adding a key detail only when supported. Avoid vague prompts and duplicated concepts.",
-        "mindmap": "Return a complete map, never only a title or root: exactly one root plus at least four distinct concepts and four labeled links. Use the example structure with concept-1 through concept-4. Use concise concept labels of 2-8 words. Every node needs the exact page number and a 20-180 character quote copied verbatim from that page. Do not make up concepts or quotes. All concepts must be reachable from root. If four supported concepts cannot be found, return fewer and ScholarMind will ask the user to retry rather than display an incomplete map.",
+        "mindmap": "Return a complete map, never only a title or root: exactly one root plus at least four distinct, paper-specific concepts and four or more labeled links. Use concise concept labels of 2-8 words, using terminology actually present in the passages. Do not add page or quote fields; those are matched to the source by the application. Every node must connect to the root.",
     }
     instruction = f"{shared} {task_instructions.get(kind, 'Create concise, useful study material grounded in the sources.')} Match this structure: {shape}"
     model = os.getenv("LLM_MODEL", "gpt-4o-mini")
@@ -204,6 +209,8 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
             fallback_data["_generation_notice"] = "The AI model returned an unusable response. No quiz, flashcards, or mind map were fabricated; try again."
             return fallback_data
         result = json.loads(content[start:end + 1])
+        if kind == "mindmap":
+            _attach_mindmap_evidence(result, hits)
         _validate_study_artifact(kind, result, hits)
         result["_generation_mode"] = "ai"
         return result
@@ -213,6 +220,83 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
         fallback_data["_generation_mode"] = "source_fallback"
         fallback_data["_generation_notice"] = _generation_failure_reason(exc, api_key, base_url, model)
         return fallback_data
+
+
+def _attach_mindmap_evidence(result: Any, hits: list[dict[str, Any]]) -> None:
+    """Attach exact page evidence to each model-proposed concept from retrieved text."""
+    if not isinstance(result, dict) or not isinstance(result.get("nodes"), list):
+        raise ValueError("Mind map response needs a nodes list")
+
+    stop_words = {
+        "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "in", "into",
+        "is", "it", "of", "on", "or", "that", "the", "their", "this", "to", "using", "with",
+        "paper", "topic", "concept", "key", "main", "central",
+    }
+    token_pattern = re.compile(r"[a-z0-9]+", re.I)
+
+    def terms(value: str) -> set[str]:
+        return {word.casefold() for word in token_pattern.findall(value) if len(word) > 1 and word.casefold() not in stop_words}
+
+    def evidence_window(sentence: str, matching_terms: set[str]) -> str | None:
+        """Return a 20–180 character verbatim window, preferring one with the concept term."""
+        sentence = re.sub(r"\s+", " ", sentence).strip()
+        if len(sentence) < 20:
+            return None
+        if len(sentence) <= 180:
+            return sentence
+        match = next((m for m in token_pattern.finditer(sentence) if m.group(0).casefold() in matching_terms), None)
+        center = match.start() if match else 0
+        start = max(0, min(center - 60, len(sentence) - 180))
+        end = min(len(sentence), start + 180)
+        if start > 0:
+            next_space = sentence.find(" ", start)
+            if next_space >= 0 and next_space < end - 20:
+                start = next_space + 1
+        if end < len(sentence):
+            previous_space = sentence.rfind(" ", start + 20, end)
+            if previous_space > start:
+                end = previous_space
+        quote = sentence[start:end].strip()
+        return quote if 20 <= len(quote) <= 180 else None
+
+    passages: list[tuple[dict[str, Any], str, set[str]]] = []
+    for hit in hits:
+        content = str(hit.get("content", ""))
+        for sentence in re.split(r"(?<=[.!?])\s+|\n+", content):
+            sentence_terms = terms(sentence)
+            if sentence_terms and len(sentence.strip()) >= 20:
+                passages.append((hit, sentence, sentence_terms))
+
+    if not passages:
+        raise ValueError("No usable paper text was found to cite in the mind map")
+
+    for node in result["nodes"]:
+        if not isinstance(node, dict) or not isinstance(node.get("label"), str):
+            raise ValueError("Mind map nodes need readable concept labels")
+        label = re.sub(r"\s+", " ", node["label"]).strip()
+        label_terms = terms(label)
+        if not label_terms:
+            raise ValueError(f'Mind map concept "{label[:80]}" has no matchable paper terms')
+
+        best: tuple[int, float, dict[str, Any], str, set[str]] | None = None
+        for hit, sentence, sentence_terms in passages:
+            overlap = label_terms & sentence_terms
+            # Require a majority of the label's meaningful words to occur in the cited sentence.
+            required = max(1, (len(label_terms) + 1) // 2)
+            if len(overlap) < required:
+                continue
+            candidate = (len(overlap), float(hit.get("score", 0.0) or 0.0), hit, sentence, overlap)
+            if best is None or candidate[:2] > best[:2]:
+                best = candidate
+        if best is None:
+            raise ValueError(f'Mind map concept "{label[:80]}" could not be matched to the paper text. Try again with a narrower focus.')
+
+        _, _, hit, sentence, overlap = best
+        quote = evidence_window(sentence, overlap)
+        if quote is None:
+            raise ValueError(f'Mind map concept "{label[:80]}" has no sentence long enough to cite')
+        node["page"] = int(hit["page_number"])
+        node["evidence"] = quote
 
 
 def _validate_study_artifact(kind: str, result: Any, hits: list[dict[str, Any]]) -> None:
