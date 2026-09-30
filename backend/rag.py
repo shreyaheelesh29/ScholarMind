@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import urllib.error
 import urllib.request
 from functools import lru_cache
 from typing import Any
@@ -124,12 +125,11 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
         _validate_study_artifact(kind, result, hits)
         result["_generation_mode"] = "ai"
         return result
-    except Exception:
+    except Exception as exc:
         # A model/provider response must not prevent source-based study material from being saved.
         logger.warning("LLM study generation failed; using retrieved paper content instead", exc_info=True)
         fallback_data["_generation_mode"] = "source_fallback"
-        fallback_data["_generation_notice"] = ("Gemini did not return a valid study set, so no incorrect quiz, flashcards, or mind map were shown. Check the backend window, then generate again."
-            if kind in {"quiz", "flashcards", "mindmap"} else "Gemini did not return valid generated content. Check the backend window, then generate again.")
+        fallback_data["_generation_notice"] = _generation_failure_reason(exc, api_key)
         return fallback_data
 
 
@@ -176,3 +176,23 @@ def _validate_study_artifact(kind: str, result: Any, hits: list[dict[str, Any]])
             raise ValueError("Mind map edge points to an unknown node")
         if len(nodes) > 1 and not edges:
             raise ValueError("Mind map concepts need relationship edges")
+
+
+def _generation_failure_reason(exc: Exception, api_key: str) -> str:
+    """Return a useful short failure explanation without leaking credentials."""
+    if isinstance(exc, urllib.error.HTTPError):
+        try:
+            body = json.loads(exc.read().decode("utf-8", errors="replace"))
+            detail = body.get("error", {}).get("message", "") if isinstance(body, dict) else ""
+        except Exception:
+            detail = ""
+        detail = str(detail).replace(api_key, "[hidden]").strip()
+        if not detail:
+            detail = "The provider did not give details."
+        return f"Gemini API HTTP {exc.code}: {detail[:260]}"
+    if isinstance(exc, urllib.error.URLError):
+        return "Could not reach Gemini. Check internet access and try again."
+    if isinstance(exc, (json.JSONDecodeError, KeyError, IndexError, TypeError)):
+        return "Gemini returned an unexpected response format. Try again; if it repeats, check the backend log."
+    reason = str(exc).replace(api_key, "[hidden]").strip()
+    return f"Gemini response did not pass validation: {reason[:220] or type(exc).__name__}."
