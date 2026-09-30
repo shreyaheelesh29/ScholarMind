@@ -29,6 +29,15 @@ CREATE TABLE IF NOT EXISTS users (
 );
 ALTER TABLE papers ADD COLUMN IF NOT EXISTS owner_id UUID REFERENCES users(id) ON DELETE SET NULL;
 CREATE INDEX IF NOT EXISTS papers_owner_idx ON papers(owner_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS paper_annotations (
+ id UUID PRIMARY KEY, paper_id UUID NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
+ user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ page_number INTEGER NOT NULL CHECK (page_number > 0),
+ kind TEXT NOT NULL CHECK (kind IN ('highlight', 'note')),
+ content TEXT NOT NULL CHECK (length(trim(content)) > 0),
+ created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS paper_annotations_user_paper_idx ON paper_annotations(user_id, paper_id, created_at DESC);
 CREATE TABLE IF NOT EXISTS login_events (
  id BIGSERIAL PRIMARY KEY, user_id UUID REFERENCES users(id) ON DELETE SET NULL,
  email TEXT NOT NULL, succeeded BOOLEAN NOT NULL, ip_address TEXT,
@@ -128,6 +137,35 @@ def get_paper(paper_id: str) -> dict[str, Any] | None:
     with connection() as conn, conn.cursor(row_factory=psycopg.rows.dict_row) as cursor:
         cursor.execute("SELECT id::text, owner_id::text, filename, stored_path, page_count, created_at FROM papers WHERE id = %s", (paper_id,))
         return cursor.fetchone()
+
+
+def list_paper_annotations(paper_id: str, user_id: str) -> list[dict[str, Any]]:
+    with connection() as conn, conn.cursor(row_factory=psycopg.rows.dict_row) as cursor:
+        cursor.execute("""SELECT id::text, paper_id::text, page_number, kind, content, created_at
+                       FROM paper_annotations WHERE paper_id = %s AND user_id = %s
+                       ORDER BY created_at DESC""", (paper_id, user_id))
+        return list(cursor.fetchall())
+
+
+def save_paper_annotation(annotation_id: str, paper_id: str, user_id: str,
+                          page_number: int, kind: str, content: str) -> dict[str, Any]:
+    with connection() as conn, conn.cursor(row_factory=psycopg.rows.dict_row) as cursor:
+        cursor.execute("""INSERT INTO paper_annotations (id, paper_id, user_id, page_number, kind, content)
+                       VALUES (%s, %s, %s, %s, %s, %s)
+                       RETURNING id::text, paper_id::text, page_number, kind, content, created_at""",
+                       (annotation_id, paper_id, user_id, page_number, kind, content))
+        result = cursor.fetchone()
+        conn.commit()
+        return result
+
+
+def delete_paper_annotation(annotation_id: str, paper_id: str, user_id: str) -> bool:
+    with connection() as conn, conn.cursor() as cursor:
+        cursor.execute("DELETE FROM paper_annotations WHERE id = %s AND paper_id = %s AND user_id = %s",
+                       (annotation_id, paper_id, user_id))
+        deleted = cursor.rowcount > 0
+        conn.commit()
+        return deleted
 
 
 def create_user(user_id: str, name: str, email: str, password_hash: str, role: str) -> dict[str, Any]:

@@ -68,11 +68,8 @@ export default function ChatWindow() {
   const [activeSession, setActiveSession] = useState(null);
   const [historyError, setHistoryError] = useState("");
   const [isTyping, setIsTyping] = useState(false);
-  const [selectedModel, setSelectedModel] = useState("ScholarMind Pro");
-  const [showModelDropdown, setShowModelDropdown] = useState(false);
   const messagesEndRef = useRef(null);
   const textareaRef = useRef(null);
-  const modelDropdownRef = useRef(null);
 
   const refreshChats = async () => {
     try { const result = await apiFetch("/chats"); setSessions(result.chats); }
@@ -97,12 +94,6 @@ export default function ChatWindow() {
     } catch (error) { setHistoryError(error.message); }
   };
 
-  const models = [
-    { id: "sm-pro", name: "ScholarMind Pro", description: "Best for deep research analysis", badge: "Recommended" },
-    { id: "sm-lite", name: "ScholarMind Lite", description: "Fast responses, concise answers", badge: "Fast" },
-    { id: "sm-vision", name: "ScholarMind Vision", description: "PDF figure & diagram analysis", badge: "New" },
-  ];
-
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   };
@@ -110,16 +101,6 @@ export default function ChatWindow() {
   useEffect(() => {
     scrollToBottom();
   }, [messages, isTyping]);
-
-  useEffect(() => {
-    const handleClickOutside = (event) => {
-      if (modelDropdownRef.current && !modelDropdownRef.current.contains(event.target)) {
-        setShowModelDropdown(false);
-      }
-    };
-    document.addEventListener("mousedown", handleClickOutside);
-    return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, []);
 
   useEffect(() => {
     if (textareaRef.current) {
@@ -494,11 +475,7 @@ export default function ChatWindow() {
               />
             </div>
 
-            <div className="relative" ref={modelDropdownRef}>
-              <button
-                onClick={() => setShowModelDropdown(!showModelDropdown)}
-                className="h-12 px-3 py-2 rounded-xl border border-slate-200 bg-white hover:border-primary-200 hover:bg-primary-50 transition flex items-center gap-2 flex-shrink-0"
-              >
+            <div className="h-12 px-3 py-2 rounded-xl border border-slate-200 bg-white flex items-center gap-2 flex-shrink-0" title="Answers are grounded in your selected papers">
                 <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-primary-500 to-accent-500 flex items-center justify-center">
                   <svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path
@@ -510,61 +487,9 @@ export default function ChatWindow() {
                   </svg>
                 </div>
                 <div className="text-left hidden sm:block">
-                  <p className="text-xs font-semibold text-slate-800 leading-tight">{selectedModel}</p>
-                  <p className="text-[10px] text-slate-400">Select model</p>
+                  <p className="text-xs font-semibold text-slate-800 leading-tight">Paper assistant</p>
+                  <p className="text-[10px] text-slate-400">Source-grounded answers</p>
                 </div>
-                <svg className="w-4 h-4 text-slate-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                </svg>
-              </button>
-
-              {showModelDropdown && (
-                <div className="absolute bottom-full right-0 mb-2 w-72 rounded-xl bg-white border border-slate-200 shadow-xl shadow-slate-200/60 overflow-hidden animate-fade-in z-40">
-                  <div className="p-3 border-b border-slate-100">
-                    <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-                      AI Model Selection
-                    </p>
-                  </div>
-                  <div className="p-2 space-y-1">
-                    {models.map((m) => (
-                      <button
-                        key={m.id}
-                        onClick={() => {
-                          setSelectedModel(m.name);
-                          setShowModelDropdown(false);
-                        }}
-                        className={`w-full p-3 rounded-lg text-left transition ${
-                          selectedModel === m.name
-                            ? "bg-primary-50 border border-primary-100"
-                            : "hover:bg-slate-50 border border-transparent"
-                        }`}
-                      >
-                        <div className="flex items-center gap-2">
-                          <p
-                            className={`text-sm font-semibold ${
-                              selectedModel === m.name ? "text-primary-700" : "text-slate-800"
-                            }`}
-                          >
-                            {m.name}
-                          </p>
-                          <span
-                            className={`px-1.5 py-0.5 rounded text-[9px] font-bold uppercase ${
-                              m.badge === "Recommended"
-                                ? "bg-accent-100 text-accent-700"
-                                : m.badge === "New"
-                                ? "bg-success-100 text-success-600"
-                                : "bg-slate-100 text-slate-600"
-                            }`}
-                          >
-                            {m.badge}
-                          </span>
-                        </div>
-                        <p className="text-xs text-slate-500 mt-1">{m.description}</p>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
             </div>
 
             <button

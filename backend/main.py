@@ -19,8 +19,9 @@ from auth import create_token, decode_token, hash_password, is_valid_email, veri
 from chunking import chunk_text
 from database import (create_user, find_user_by_email, get_paper, get_user, hybrid_search,
                       create_chat_session, get_user_chat, initialise, list_admin_logins, list_admin_users, list_papers, list_user_chats,
-                      list_user_data, list_user_notifications, get_user_settings, mark_user_notifications_read,
-                      update_user_settings, record_activity, record_login, save_artifact,
+                      list_paper_annotations, list_user_data, list_user_notifications, get_user_settings,
+                      mark_user_notifications_read, update_user_settings, record_activity, record_login, save_artifact,
+                      save_paper_annotation, delete_paper_annotation,
                       save_chat_message, save_chunks, save_paper, sync_admin_emails)
 from rag import answer, citations_for, embed, generate_study_artifact
 
@@ -65,6 +66,12 @@ class GenerateRequest(BaseModel):
 class ArtifactUpdate(BaseModel):
     title: str | None = Field(default=None, max_length=200)
     payload: dict[str, Any] | None = None
+
+
+class PaperAnnotationRequest(BaseModel):
+    page_number: int = Field(ge=1)
+    kind: str = Field(pattern="^(highlight|note)$")
+    content: str = Field(min_length=1, max_length=5000)
 
 
 class SettingsUpdate(BaseModel):
@@ -289,6 +296,35 @@ def paper_index(paper_id: str, user: dict[str, Any] = Depends(current_user)):
         raise HTTPException(status_code=422, detail=f"Could not read PDF contents: {exc}") from exc
 
 
+@app.get("/api/papers/{paper_id}/annotations")
+def paper_annotations(paper_id: str, user: dict[str, Any] = Depends(current_user)):
+    owned_paper(paper_id, user)
+    return {"annotations": list_paper_annotations(paper_id, user["id"])}
+
+
+@app.post("/api/papers/{paper_id}/annotations", status_code=201)
+def create_paper_annotation(paper_id: str, payload: PaperAnnotationRequest,
+                            user: dict[str, Any] = Depends(current_user)):
+    paper = owned_paper(paper_id, user)
+    if payload.page_number > paper["page_count"]:
+        raise HTTPException(status_code=422, detail="Page number is outside this PDF")
+    content = payload.content.strip()
+    if not content:
+        raise HTTPException(status_code=422, detail="Enter a quote or note before saving")
+    annotation = save_paper_annotation(str(uuid.uuid4()), paper_id, user["id"],
+                                       payload.page_number, payload.kind, content)
+    return {"annotation": annotation}
+
+
+@app.delete("/api/papers/{paper_id}/annotations/{annotation_id}", status_code=204)
+def remove_paper_annotation(paper_id: str, annotation_id: str,
+                            user: dict[str, Any] = Depends(current_user)):
+    owned_paper(paper_id, user)
+    if not delete_paper_annotation(annotation_id, paper_id, user["id"]):
+        raise HTTPException(status_code=404, detail="Annotation not found")
+    return Response(status_code=204)
+
+
 @app.get("/api/papers/{paper_id}/file")
 def paper_file(paper_id: str, user: dict[str, Any] = Depends(current_user)):
     result = owned_paper(paper_id, user)
@@ -334,18 +370,20 @@ def chat(request: ChatRequest, user: dict[str, Any] = Depends(current_user)):
         for paper_id in request.paper_ids:
             owned_paper(paper_id, user)
     hits = hybrid_search(request.question, embed([request.question])[0], request.paper_ids, request.top_k, owner_id=user["id"])
-    if not hits:
-        raise HTTPException(status_code=404, detail="No indexed paper content was found. Upload a text-based PDF first.")
     citations = citations_for(hits)
     session = None
+    history: list[dict[str, str]] = []
     if request.session_id:
         session = get_user_chat(user["id"], request.session_id)
         if not session:
             raise HTTPException(status_code=404, detail="Chat not found")
+        history = [{"role": message["role"], "content": message["content"]}
+                   for message in session["messages"][-8:]
+                   if message["role"] in {"user", "assistant"}]
     else:
         session = create_chat_session(user["id"], request.question.strip()[:120], request.paper_ids[0] if request.paper_ids else None)
     save_chat_message(session["id"], "user", request.question)
-    response = {"answer": answer(request.question, hits), "citations": citations,
+    response = {"answer": answer(request.question, hits, history), "citations": citations,
                 "sources": [{"type": "page", "label": f"{item['paperTitle']} p.{item['page']}", "page": item["page"]} for item in citations],
                 "mode": "llm" if os.getenv("LLM_API_KEY") else "retrieval-only"}
     save_chat_message(session["id"], "assistant", response["answer"], citations, response["sources"])
