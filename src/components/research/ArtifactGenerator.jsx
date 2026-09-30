@@ -23,21 +23,27 @@ function OutputValue({ value }) {
   return <div className="space-y-2">{entries.map(([key, item]) => <div key={key}><p className="mb-0.5 text-xs font-bold uppercase tracking-wide text-slate-500">{key.replaceAll("_", " ")}</p><OutputValue value={item} /></div>)}{value.speaker_notes && <div className="border-l-2 border-primary-300 pl-3"><p className="text-xs font-bold uppercase tracking-wide text-primary-700">Presenter notes</p><p className="mt-1 text-sm text-slate-700">{value.speaker_notes}</p></div>}</div>;
 }
 
-export default function ArtifactGenerator({ kinds, heading = "Generate from your paper", multiPaper = false, id }) {
+export default function ArtifactGenerator({ kinds, heading = "Generate from your paper", multiPaper = false, id, initialPaperId = "" }) {
   const [papers, setPapers] = useState([]);
   const [paperIds, setPaperIds] = useState([]);
   const [kind, setKind] = useState(kinds[0]);
   const [prompt, setPrompt] = useState("");
   const [artifact, setArtifact] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [loadingPapers, setLoadingPapers] = useState(true);
   const [error, setError] = useState("");
 
   useEffect(() => {
     apiFetch("/papers").then(({ papers: items }) => {
       setPapers(items);
-      if (items.length) setPaperIds(multiPaper ? items.slice(0, 10).map((item) => item.id) : [items[0].id]);
-    }).catch((err) => setError(err.message));
-  }, []);
+      if (items.length) {
+        setPaperIds(multiPaper
+          ? items.slice(0, 10).map((item) => item.id)
+          : [items.find((item) => item.id === initialPaperId)?.id || items[0].id]);
+      }
+    }).catch((err) => setError(err.message))
+      .finally(() => setLoadingPapers(false));
+  }, [initialPaperId, multiPaper]);
 
   const generate = async (event) => {
     event.preventDefault();
@@ -56,11 +62,11 @@ export default function ArtifactGenerator({ kinds, heading = "Generate from your
   return <section id={id} className="space-y-4 rounded-2xl border border-indigo-100 bg-gradient-to-br from-indigo-50/80 via-white to-white p-5 shadow-sm">
     <div><p className="text-xs font-bold uppercase tracking-wider text-indigo-600">Paper-grounded AI</p><h2 className="mt-1 text-lg font-bold text-slate-900">{heading}</h2><p className="mt-1 text-sm text-slate-500">Generated material is saved to your My Data & History.</p></div>
     <form onSubmit={generate} className="grid gap-3 md:grid-cols-[minmax(180px,1fr)_minmax(150px,0.8fr)_auto]">
-      {multiPaper ? <fieldset disabled={!papers.length || loading} className="flex max-h-36 flex-col gap-1 overflow-auto rounded-lg border border-slate-200 bg-white p-3 md:col-span-3"><legend className="px-1 text-xs font-bold text-slate-500">Select up to 10 source papers</legend>{papers.map((paper) => <label key={paper.id} className="flex items-center gap-2 text-sm text-slate-700"><input type="checkbox" checked={paperIds.includes(paper.id)} disabled={!paperIds.includes(paper.id) && paperIds.length >= 10} onChange={(e) => setPaperIds((ids) => e.target.checked ? [...ids, paper.id] : ids.filter((id) => id !== paper.id))} />{paper.filename}</label>)}</fieldset> : <select aria-label="Source paper" value={paperIds[0] || ""} onChange={(e) => setPaperIds(e.target.value ? [e.target.value] : [])} disabled={!papers.length || loading} className="rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700">{papers.length ? papers.map((paper) => <option key={paper.id} value={paper.id}>{paper.filename}</option>) : <option value="">No uploaded papers</option>}</select>}
+      {multiPaper ? <fieldset disabled={!papers.length || loading || loadingPapers} className="flex max-h-36 flex-col gap-1 overflow-auto rounded-lg border border-slate-200 bg-white p-3 md:col-span-3"><legend className="px-1 text-xs font-bold text-slate-500">Select up to 10 source papers</legend>{papers.map((paper) => <label key={paper.id} className="flex items-center gap-2 text-sm text-slate-700"><input type="checkbox" checked={paperIds.includes(paper.id)} disabled={!paperIds.includes(paper.id) && paperIds.length >= 10} onChange={(e) => setPaperIds((ids) => e.target.checked ? [...ids, paper.id] : ids.filter((id) => id !== paper.id))} />{paper.filename}</label>)}</fieldset> : <select aria-label="Source paper" value={paperIds[0] || ""} onChange={(e) => setPaperIds(e.target.value ? [e.target.value] : [])} disabled={!papers.length || loading || loadingPapers} className="rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700">{loadingPapers ? <option value="">Loading your papers…</option> : papers.length ? papers.map((paper) => <option key={paper.id} value={paper.id}>{paper.filename}</option>) : <option value="">No uploaded papers</option>}</select>}
       <select aria-label="Material type" value={kind} onChange={(e) => setKind(e.target.value)} disabled={loading} className="rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700">
         {kinds.map((value) => <option key={value} value={value}>{labels[value] || value}</option>)}
       </select>
-      <button disabled={!paperIds.length || loading} className="rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50">{loading ? "Generating…" : `Generate ${labels[kind] || "material"}`}</button>
+      <button disabled={!paperIds.length || loading || loadingPapers} className="rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50">{loading ? "Generating…" : `Generate ${labels[kind] || "material"}`}</button>
       <input value={prompt} onChange={(e) => setPrompt(e.target.value)} maxLength={1000} placeholder="Optional focus or topic" className="rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm md:col-span-3" />
     </form>
     {error && <p role="alert" className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p>}
