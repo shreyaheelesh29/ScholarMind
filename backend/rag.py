@@ -57,7 +57,8 @@ def _is_local_ollama(base_url: str) -> bool:
 
 
 def _chat_request(base_url: str, model: str, messages: list[dict[str, str]], timeout: int,
-                  temperature: float = 0.2, max_tokens: int = 2048, json_mode: bool = False) -> str:
+                  temperature: float = 0.2, max_tokens: int = 2048, json_mode: bool = False,
+                  json_schema: dict[str, Any] | None = None) -> str:
     """Call local Ollama natively, or use the configured provider's OpenAI-compatible API."""
     if _is_local_ollama(base_url):
         root_url = base_url.removesuffix("/v1").rstrip("/")
@@ -66,7 +67,9 @@ def _chat_request(base_url: str, model: str, messages: list[dict[str, str]], tim
             "think": False, "keep_alive": "5m",
             "options": {"temperature": temperature, "num_predict": max_tokens},
         }
-        if json_mode:
+        if json_schema is not None:
+            body["format"] = json_schema
+        elif json_mode:
             body["format"] = "json"
         endpoint = f"{root_url}/api/chat"
     else:
@@ -81,6 +84,37 @@ def _chat_request(base_url: str, model: str, messages: list[dict[str, str]], tim
     if not isinstance(content, str) or not content.strip():
         raise ValueError("The model returned an empty response")
     return content.strip()
+
+
+def _mindmap_schema() -> dict[str, Any]:
+    """Constrain local Ollama to a useful map shape before validating source evidence."""
+    node = {
+        "type": "object",
+        "properties": {
+            "id": {"type": "string"}, "label": {"type": "string"},
+            "page": {"type": "integer"}, "evidence": {"type": "string"},
+        },
+        "required": ["id", "label", "page", "evidence"],
+        "additionalProperties": False,
+    }
+    edge = {
+        "type": "object",
+        "properties": {
+            "source": {"type": "string"}, "target": {"type": "string"},
+            "label": {"type": "string"},
+        },
+        "required": ["source", "target", "label"],
+        "additionalProperties": False,
+    }
+    return {
+        "type": "object",
+        "properties": {
+            "nodes": {"type": "array", "minItems": 5, "maxItems": 7, "items": node},
+            "edges": {"type": "array", "minItems": 4, "maxItems": 12, "items": edge},
+        },
+        "required": ["nodes", "edges"],
+        "additionalProperties": False,
+    }
 
 def _extractive_answer(hits: list[dict[str, Any]]) -> str:
     if not hits:
@@ -119,7 +153,7 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
         shape = '{"cards":[{"front":"A focused question testing one concept","back":"A concise, accurate answer supported by the paper","page":1}]}'
     elif kind == "mindmap":
         fallback_data = {"nodes": [], "edges": []}
-        shape = '{"nodes":[{"id":"root","label":"Paper central topic","page":1,"evidence":"Exact short supporting quote from the cited page"},{"id":"concept-1","label":"Specific concept","page":2,"evidence":"Exact short supporting quote from the cited page"}],"edges":[{"source":"root","target":"concept-1","label":"explains"}]}'
+        shape = '{"nodes":[{"id":"root","label":"Paper central topic","page":1,"evidence":"Exact quote copied from page 1"},{"id":"concept-1","label":"Specific concept one","page":1,"evidence":"Exact quote copied from page 1"},{"id":"concept-2","label":"Specific concept two","page":2,"evidence":"Exact quote copied from page 2"},{"id":"concept-3","label":"Specific concept three","page":3,"evidence":"Exact quote copied from page 3"},{"id":"concept-4","label":"Specific concept four","page":4,"evidence":"Exact quote copied from page 4"}],"edges":[{"source":"root","target":"concept-1","label":"includes"},{"source":"root","target":"concept-2","label":"explains"},{"source":"root","target":"concept-3","label":"uses"},{"source":"root","target":"concept-4","label":"evaluates"}]}'
     elif kind == "quiz":
         fallback_data = {"questions": []}
         shape = '{"questions":[{"question":"A clear question testing understanding, not a copied sentence","options":["Plausible answer A","Plausible answer B","Plausible answer C","Plausible answer D"],"answer":0,"explanation":"Why this is correct, grounded in the paper","page":1}]}'
@@ -143,7 +177,7 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
     task_instructions = {
         "quiz": "Create multiple-choice questions that test distinct, important concepts from this paper. Every question must be answerable from the cited passage. Provide exactly four different, plausible options; exactly one is correct. `answer` is the zero-based index (0-3) of that correct option. Explanation must justify the answer using the paper, not merely repeat the answer.",
         "flashcards": "Create study flashcards, one concept per card. `front` must be a direct, self-contained question. `back` must state the correct answer concisely in your own words, adding a key detail only when supported. Avoid vague prompts and duplicated concepts.",
-        "mindmap": "Build a useful concept map, not just a title. Return one root plus at least 4 and up to 8 distinct, important concepts supported by the supplied passages. Each node label should be a concise concept (2-8 words), never a copied sentence. For EVERY node include the exact source page number and an evidence quote copied verbatim from that page (20-180 characters). Connect all concepts in a hierarchy with meaningful, short edge labels (for example: 'contains', 'enables', 'measured by'). Every non-root node must be reachable from root. If the passages do not support four concepts, still use only supported concepts; validation will report insufficient evidence rather than inventing topics.",
+        "mindmap": "Return a complete map, never only a title or root: exactly one root plus at least four distinct concepts and four labeled links. Use the example structure with concept-1 through concept-4. Use concise concept labels of 2-8 words. Every node needs the exact page number and a 20-180 character quote copied verbatim from that page. Do not make up concepts or quotes. All concepts must be reachable from root. If four supported concepts cannot be found, return fewer and ScholarMind will ask the user to retry rather than display an incomplete map.",
     }
     instruction = f"{shared} {task_instructions.get(kind, 'Create concise, useful study material grounded in the sources.')} Match this structure: {shape}"
     model = os.getenv("LLM_MODEL", "gpt-4o-mini")
@@ -154,7 +188,9 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
     try:
         content = _chat_request(base_url, model, messages,
             timeout=240 if _is_local_ollama(base_url) else 90,
-            max_tokens=3072 if kind == "mindmap" else 2048, json_mode=True)
+            max_tokens=3072 if kind == "mindmap" else 2048,
+            json_mode=kind != "mindmap",
+            json_schema=_mindmap_schema() if kind == "mindmap" and _is_local_ollama(base_url) else None)
         if not isinstance(content, str) or not content.strip():
             logger.warning("LLM study generation returned empty content; using retrieved paper content instead")
             fallback_data["_generation_mode"] = "source_fallback"
