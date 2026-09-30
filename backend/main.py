@@ -19,7 +19,8 @@ from auth import create_token, decode_token, hash_password, is_valid_email, veri
 from chunking import chunk_text
 from database import (create_user, find_user_by_email, get_paper, get_user, hybrid_search,
                       create_chat_session, get_user_chat, initialise, list_admin_logins, list_admin_users, list_papers, list_user_chats,
-                      list_user_data, record_activity, record_login, save_artifact,
+                      list_paper_annotations, list_user_data, record_activity, record_login, save_artifact,
+                      save_paper_annotation, delete_paper_annotation,
                       save_chat_message, save_chunks, save_paper, sync_admin_emails)
 from rag import answer, citations_for, embed, generate_study_artifact
 
@@ -64,6 +65,12 @@ class GenerateRequest(BaseModel):
 class ArtifactUpdate(BaseModel):
     title: str | None = Field(default=None, max_length=200)
     payload: dict[str, Any] | None = None
+
+
+class PaperAnnotationRequest(BaseModel):
+    page_number: int = Field(ge=1)
+    kind: str = Field(pattern="^(highlight|note)$")
+    content: str = Field(min_length=1, max_length=5000)
 
 
 @app.on_event("startup")
@@ -242,6 +249,35 @@ def paper_index(paper_id: str, user: dict[str, Any] = Depends(current_user)):
         return pdf_index(result["stored_path"])
     except Exception as exc:
         raise HTTPException(status_code=422, detail=f"Could not read PDF contents: {exc}") from exc
+
+
+@app.get("/api/papers/{paper_id}/annotations")
+def paper_annotations(paper_id: str, user: dict[str, Any] = Depends(current_user)):
+    owned_paper(paper_id, user)
+    return {"annotations": list_paper_annotations(paper_id, user["id"])}
+
+
+@app.post("/api/papers/{paper_id}/annotations", status_code=201)
+def create_paper_annotation(paper_id: str, payload: PaperAnnotationRequest,
+                            user: dict[str, Any] = Depends(current_user)):
+    paper = owned_paper(paper_id, user)
+    if payload.page_number > paper["page_count"]:
+        raise HTTPException(status_code=422, detail="Page number is outside this PDF")
+    content = payload.content.strip()
+    if not content:
+        raise HTTPException(status_code=422, detail="Enter a quote or note before saving")
+    annotation = save_paper_annotation(str(uuid.uuid4()), paper_id, user["id"],
+                                       payload.page_number, payload.kind, content)
+    return {"annotation": annotation}
+
+
+@app.delete("/api/papers/{paper_id}/annotations/{annotation_id}", status_code=204)
+def remove_paper_annotation(paper_id: str, annotation_id: str,
+                            user: dict[str, Any] = Depends(current_user)):
+    owned_paper(paper_id, user)
+    if not delete_paper_annotation(annotation_id, paper_id, user["id"]):
+        raise HTTPException(status_code=404, detail="Annotation not found")
+    return Response(status_code=204)
 
 
 @app.get("/api/papers/{paper_id}/file")
