@@ -3,6 +3,12 @@ const API_BASE = "/api";
 export function saveSession(result) {
   localStorage.setItem("scholarmind_token", result.access_token);
   localStorage.setItem("scholarmind_user", JSON.stringify(result.user));
+  window.dispatchEvent(new Event("scholarmind-user-updated"));
+}
+
+export function saveSessionUser(user) {
+  localStorage.setItem("scholarmind_user", JSON.stringify(user));
+  window.dispatchEvent(new Event("scholarmind-user-updated"));
 }
 
 export function getSessionUser() {
@@ -16,6 +22,7 @@ export function getSessionUser() {
 export function clearSession() {
   localStorage.removeItem("scholarmind_token");
   localStorage.removeItem("scholarmind_user");
+  window.dispatchEvent(new Event("scholarmind-user-updated"));
 }
 
 export async function apiFetch(path, options = {}) {

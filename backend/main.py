@@ -19,7 +19,8 @@ from auth import create_token, decode_token, hash_password, is_valid_email, veri
 from chunking import chunk_text
 from database import (create_user, find_user_by_email, get_paper, get_user, hybrid_search,
                       create_chat_session, get_user_chat, initialise, list_admin_logins, list_admin_users, list_papers, list_user_chats,
-                      list_paper_annotations, list_user_data, record_activity, record_login, save_artifact,
+                      list_paper_annotations, list_user_data, list_user_notifications, get_user_settings,
+                      mark_user_notifications_read, update_user_settings, record_activity, record_login, save_artifact,
                       save_paper_annotation, delete_paper_annotation,
                       save_chat_message, save_chunks, save_paper, sync_admin_emails)
 from rag import answer, citations_for, embed, generate_study_artifact
@@ -28,7 +29,7 @@ BASE_DIR = Path(__file__).resolve().parent
 PAPERS_DIR = BASE_DIR / "data" / "papers"
 MAX_UPLOAD_BYTES = 100 * 1024 * 1024
 AUTH = HTTPBearer(auto_error=False)
-ARTIFACT_TYPES = {"flashcards", "mindmap", "quiz", "summary", "report", "ppt_outline", "viva", "literature_review", "visualization"}
+ARTIFACT_TYPES = {"flashcards", "mindmap", "quiz", "summary", "report", "ppt_outline", "viva", "literature_review", "visualization", "comparison", "research_gap", "research_ideas"}
 
 app = FastAPI(title="ScholarMind Backend", version="1.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:5173").split(","),
@@ -55,7 +56,7 @@ class ChatRequest(BaseModel):
 
 
 class GenerateRequest(BaseModel):
-    kind: str = Field(pattern="^(flashcards|mindmap|quiz|summary|report|ppt_outline|viva|literature_review|visualization)$")
+    kind: str = Field(pattern="^(flashcards|mindmap|quiz|summary|report|ppt_outline|viva|literature_review|visualization|comparison|research_gap|research_ideas)$")
     paper_id: str | None = None
     paper_ids: list[str] | None = Field(default=None, max_length=10)
     prompt: str = Field(default="", max_length=1000)
@@ -71,6 +72,12 @@ class PaperAnnotationRequest(BaseModel):
     page_number: int = Field(ge=1)
     kind: str = Field(pattern="^(highlight|note)$")
     content: str = Field(min_length=1, max_length=5000)
+
+
+class SettingsUpdate(BaseModel):
+    profile: dict[str, str] | None = None
+    notifications: dict[str, bool] | None = None
+    theme: str | None = Field(default=None, pattern="^(light|dark|system)$")
 
 
 @app.on_event("startup")
@@ -209,6 +216,44 @@ def me(user: dict[str, Any] = Depends(current_user)):
 @app.get("/api/me/data")
 def my_data(user: dict[str, Any] = Depends(current_user)):
     return list_user_data(user["id"])
+
+
+@app.get("/api/settings")
+def settings(user: dict[str, Any] = Depends(current_user)):
+    return get_user_settings(user["id"])
+
+
+@app.patch("/api/settings")
+def save_settings(payload: SettingsUpdate, user: dict[str, Any] = Depends(current_user)):
+    allowed_profile = {"name", "institution", "bio", "field", "keywords", "scholar", "github", "linkedin"}
+    allowed_notifications = {"papers", "ideas", "viva", "newsletter", "marketing"}
+    profile = payload.profile or {}
+    notifications = payload.notifications or {}
+    if set(profile) - allowed_profile:
+        raise HTTPException(status_code=422, detail="The profile contains unsupported fields")
+    if set(notifications) - allowed_notifications:
+        raise HTTPException(status_code=422, detail="The notification preferences contain unsupported fields")
+    profile = {key: value.strip() for key, value in profile.items()}
+    limits = {"name": 120, "institution": 200, "bio": 1000, "field": 120,
+              "keywords": 500, "scholar": 500, "github": 500, "linkedin": 500}
+    for key, value in profile.items():
+        if len(value) > limits[key]:
+            raise HTTPException(status_code=422, detail=f"{key.title()} is too long")
+    if "name" in profile and len(profile["name"]) < 2:
+        raise HTTPException(status_code=422, detail="Name must contain at least 2 characters")
+    return update_user_settings(user["id"], profile=profile, notifications=notifications, theme=payload.theme)
+
+
+@app.get("/api/notifications")
+def notifications(user: dict[str, Any] = Depends(current_user)):
+    items = list_user_notifications(user["id"])
+    return {"notifications": items, "unread_count": sum(not item["read"] for item in items)}
+
+
+@app.post("/api/notifications/read")
+def read_notifications(user: dict[str, Any] = Depends(current_user)):
+    mark_user_notifications_read(user["id"])
+    return {"ok": True}
 
 
 @app.get("/api/chats")
@@ -353,16 +398,32 @@ def generate_learning(payload: GenerateRequest, user: dict[str, Any] = Depends(c
     papers = [owned_paper(paper_id, user) for paper_id in paper_ids]
     paper_names = ", ".join(paper["filename"] for paper in papers)
     focus = payload.prompt.strip()
-    if focus:
-        query = focus
-    else:
-        retrieval_topics = {
+    retrieval_topics = {
             "quiz": "important concepts definitions methods results findings conclusions limitations",
             "flashcards": "key concepts definitions terminology methods findings takeaways",
             "mindmap": "central topic key concepts themes methods results relationships",
-        }
-        query = f"{retrieval_topics.get(payload.kind, f'key findings and main ideas')} from {paper_names}"
-    hits = hybrid_search(query, embed([query])[0], paper_ids, min(payload.count, 10), owner_id=user["id"])
+            "comparison": "research objectives methodology datasets experiments results limitations contributions",
+            "literature_review": "research themes methods findings results limitations trends",
+            "research_gap": "limitations unresolved questions future work missing evidence contradictory findings",
+            "research_ideas": "limitations unresolved questions future work methods findings",
+    }
+    topic_query = retrieval_topics.get(payload.kind)
+    if topic_query:
+        query = f"{topic_query} {focus} from {paper_names}".strip()
+    elif focus:
+        query = focus
+    else:
+        query = f"key findings and main ideas from {paper_names}"
+    query_embedding = embed([query])[0]
+    cross_paper_kinds = {"comparison", "literature_review", "research_gap", "research_ideas"}
+    if payload.kind in cross_paper_kinds and len(paper_ids) > 1:
+        # Retrieve independently per selected paper so a single document cannot crowd out the others.
+        per_paper_limit = max(1, min(4, payload.count // len(paper_ids)))
+        hits = []
+        for selected_id in paper_ids:
+            hits.extend(hybrid_search(query, query_embedding, [selected_id], per_paper_limit, owner_id=user["id"]))
+    else:
+        hits = hybrid_search(query, query_embedding, paper_ids, min(payload.count, 10), owner_id=user["id"])
     if not hits:
         raise HTTPException(status_code=404, detail="No text passages found for this paper")
     try:
