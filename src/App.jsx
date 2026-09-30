@@ -1,6 +1,8 @@
-import { lazy, Suspense } from "react";
+import { lazy, Suspense, useEffect } from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import AppLayout from "./components/layout/AppLayout";
+import { apiFetch } from "./api";
+import { applyTheme, getTheme } from "./theme";
 
 const Login = lazy(() => import("./pages/Login"));
 const Register = lazy(() => import("./pages/Register"));
@@ -22,6 +24,13 @@ const MyData = lazy(() => import("./pages/MyData"));
 const Admin = lazy(() => import("./pages/Admin"));
 
 export default function App() {
+  useEffect(() => {
+    applyTheme(getTheme());
+    if (localStorage.getItem("scholarmind_token")) {
+      apiFetch("/settings").then((settings) => applyTheme(settings.theme)).catch(() => {});
+    }
+  }, []);
+
   return (
     <BrowserRouter>
       <Suspense

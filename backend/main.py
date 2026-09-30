@@ -19,7 +19,8 @@ from auth import create_token, decode_token, hash_password, is_valid_email, veri
 from chunking import chunk_text
 from database import (create_user, find_user_by_email, get_paper, get_user, hybrid_search,
                       create_chat_session, get_user_chat, initialise, list_admin_logins, list_admin_users, list_papers, list_user_chats,
-                      list_user_data, record_activity, record_login, save_artifact,
+                      list_user_data, list_user_notifications, get_user_settings, mark_user_notifications_read,
+                      update_user_settings, record_activity, record_login, save_artifact,
                       save_chat_message, save_chunks, save_paper, sync_admin_emails)
 from rag import answer, citations_for, embed, generate_study_artifact
 
@@ -64,6 +65,12 @@ class GenerateRequest(BaseModel):
 class ArtifactUpdate(BaseModel):
     title: str | None = Field(default=None, max_length=200)
     payload: dict[str, Any] | None = None
+
+
+class SettingsUpdate(BaseModel):
+    profile: dict[str, str] | None = None
+    notifications: dict[str, bool] | None = None
+    theme: str | None = Field(default=None, pattern="^(light|dark|system)$")
 
 
 @app.on_event("startup")
@@ -202,6 +209,44 @@ def me(user: dict[str, Any] = Depends(current_user)):
 @app.get("/api/me/data")
 def my_data(user: dict[str, Any] = Depends(current_user)):
     return list_user_data(user["id"])
+
+
+@app.get("/api/settings")
+def settings(user: dict[str, Any] = Depends(current_user)):
+    return get_user_settings(user["id"])
+
+
+@app.patch("/api/settings")
+def save_settings(payload: SettingsUpdate, user: dict[str, Any] = Depends(current_user)):
+    allowed_profile = {"name", "institution", "bio", "field", "keywords", "scholar", "github", "linkedin"}
+    allowed_notifications = {"papers", "ideas", "viva", "newsletter", "marketing"}
+    profile = payload.profile or {}
+    notifications = payload.notifications or {}
+    if set(profile) - allowed_profile:
+        raise HTTPException(status_code=422, detail="The profile contains unsupported fields")
+    if set(notifications) - allowed_notifications:
+        raise HTTPException(status_code=422, detail="The notification preferences contain unsupported fields")
+    profile = {key: value.strip() for key, value in profile.items()}
+    limits = {"name": 120, "institution": 200, "bio": 1000, "field": 120,
+              "keywords": 500, "scholar": 500, "github": 500, "linkedin": 500}
+    for key, value in profile.items():
+        if len(value) > limits[key]:
+            raise HTTPException(status_code=422, detail=f"{key.title()} is too long")
+    if "name" in profile and len(profile["name"]) < 2:
+        raise HTTPException(status_code=422, detail="Name must contain at least 2 characters")
+    return update_user_settings(user["id"], profile=profile, notifications=notifications, theme=payload.theme)
+
+
+@app.get("/api/notifications")
+def notifications(user: dict[str, Any] = Depends(current_user)):
+    items = list_user_notifications(user["id"])
+    return {"notifications": items, "unread_count": sum(not item["read"] for item in items)}
+
+
+@app.post("/api/notifications/read")
+def read_notifications(user: dict[str, Any] = Depends(current_user)):
+    mark_user_notifications_read(user["id"])
+    return {"ok": True}
 
 
 @app.get("/api/chats")

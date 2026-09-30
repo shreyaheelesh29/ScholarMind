@@ -48,6 +48,14 @@ CREATE TABLE IF NOT EXISTS activity_events (
  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS activity_events_user_idx ON activity_events(user_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS user_preferences (
+ user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+ profile_data JSONB NOT NULL DEFAULT '{}'::jsonb,
+ notification_preferences JSONB NOT NULL DEFAULT '{"papers":true,"ideas":true,"viva":false,"newsletter":true,"marketing":false}'::jsonb,
+ theme TEXT NOT NULL DEFAULT 'system' CHECK (theme IN ('light','dark','system')),
+ notifications_read_through BIGINT NOT NULL DEFAULT 0,
+ updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 CREATE TABLE IF NOT EXISTS chat_sessions (
  id UUID PRIMARY KEY, user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
  paper_id UUID REFERENCES papers(id) ON DELETE SET NULL, title TEXT NOT NULL DEFAULT 'New chat',
@@ -160,6 +168,90 @@ def record_activity(user_id: str, action: str, details: dict[str, Any] | None = 
     with connection() as conn, conn.cursor() as cursor:
         cursor.execute("INSERT INTO activity_events (user_id, action, details) VALUES (%s, %s, %s)",
                        (user_id, action, Jsonb(details or {})))
+        conn.commit()
+
+
+DEFAULT_NOTIFICATION_PREFERENCES = {"papers": True, "ideas": True, "viva": False, "newsletter": True, "marketing": False}
+
+
+def get_user_settings(user_id: str) -> dict[str, Any]:
+    with connection() as conn, conn.cursor(row_factory=psycopg.rows.dict_row) as cursor:
+        cursor.execute("""INSERT INTO user_preferences (user_id) VALUES (%s) ON CONFLICT (user_id) DO NOTHING""", (user_id,))
+        cursor.execute("""SELECT u.name, u.email, u.role, u.created_at, u.last_login_at,
+                       pref.profile_data, pref.notification_preferences, pref.theme,
+                       pref.notifications_read_through
+                       FROM users u JOIN user_preferences pref ON pref.user_id = u.id WHERE u.id = %s""", (user_id,))
+        row = cursor.fetchone()
+        conn.commit()
+    if not row:
+        return {"profile": {}, "notifications": DEFAULT_NOTIFICATION_PREFERENCES.copy(), "theme": "system", "notifications_read_through": 0}
+    profile = dict(row["profile_data"] or {})
+    profile.update({key: row[key] for key in ("name", "email", "role", "created_at", "last_login_at")})
+    notifications = DEFAULT_NOTIFICATION_PREFERENCES | dict(row["notification_preferences"] or {})
+    return {"profile": profile, "notifications": notifications, "theme": row["theme"],
+            "notifications_read_through": row["notifications_read_through"]}
+
+
+def update_user_settings(user_id: str, profile: dict[str, Any] | None = None,
+                         notifications: dict[str, bool] | None = None, theme: str | None = None) -> dict[str, Any]:
+    current = get_user_settings(user_id)
+    profile_data = dict(current["profile"])
+    profile_data.pop("email", None)
+    profile_data.pop("role", None)
+    profile_data.pop("created_at", None)
+    profile_data.pop("last_login_at", None)
+    if profile:
+        profile_data.update(profile)
+    notification_data = DEFAULT_NOTIFICATION_PREFERENCES | current["notifications"]
+    if notifications:
+        notification_data.update(notifications)
+    selected_theme = theme or current["theme"]
+    with connection() as conn, conn.cursor() as cursor:
+        if profile and isinstance(profile.get("name"), str):
+            cursor.execute("UPDATE users SET name = %s WHERE id = %s", (profile["name"], user_id))
+        cursor.execute("""INSERT INTO user_preferences (user_id, profile_data, notification_preferences, theme)
+                       VALUES (%s, %s, %s, %s)
+                       ON CONFLICT (user_id) DO UPDATE SET profile_data = EXCLUDED.profile_data,
+                       notification_preferences = EXCLUDED.notification_preferences,
+                       theme = EXCLUDED.theme, updated_at = NOW()""",
+                       (user_id, Jsonb(profile_data), Jsonb(notification_data), selected_theme))
+        conn.commit()
+    return get_user_settings(user_id)
+
+
+def list_user_notifications(user_id: str, limit: int = 30) -> list[dict[str, Any]]:
+    settings = get_user_settings(user_id)
+    with connection() as conn, conn.cursor(row_factory=psycopg.rows.dict_row) as cursor:
+        cursor.execute("""SELECT e.id, e.action, e.details, e.created_at, pref.notifications_read_through
+                       FROM activity_events e JOIN user_preferences pref ON pref.user_id = e.user_id
+                       WHERE e.user_id = %s ORDER BY e.id DESC LIMIT %s""", (user_id, limit))
+        rows = list(cursor.fetchall())
+    notifications = settings["notifications"]
+    items = []
+    for row in rows:
+        action = row["action"]
+        category = "papers" if action == "paper_uploaded" else "ideas" if action == "generated_research_ideas" else "viva" if action == "generated_viva" else None
+        if category and not notifications.get(category, True):
+            continue
+        details = row["details"] or {}
+        title = action.replace("_", " ").strip().capitalize()
+        description = details.get("filename") or details.get("title") or details.get("paper_ids")
+        if isinstance(description, list):
+            description = f"{len(description)} paper(s)"
+        if not description:
+            description = "Your ScholarMind activity was recorded."
+        items.append({"id": row["id"], "action": action, "title": title,
+                      "description": str(description), "created_at": row["created_at"],
+                      "read": row["id"] <= row["notifications_read_through"]})
+    return items
+
+
+def mark_user_notifications_read(user_id: str) -> None:
+    with connection() as conn, conn.cursor() as cursor:
+        cursor.execute("""INSERT INTO user_preferences (user_id) VALUES (%s) ON CONFLICT (user_id) DO NOTHING""", (user_id,))
+        cursor.execute("""UPDATE user_preferences SET notifications_read_through = COALESCE(
+                       (SELECT MAX(id) FROM activity_events WHERE user_id = %s), 0), updated_at = NOW()
+                       WHERE user_id = %s""", (user_id, user_id))
         conn.commit()
 
 
