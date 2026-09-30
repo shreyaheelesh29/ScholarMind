@@ -5,11 +5,13 @@ import json
 import logging
 import os
 import random
+import socket
 import time
 import urllib.error
 import urllib.request
 from functools import lru_cache
 from typing import Any
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +49,38 @@ def _open_with_retries(request: urllib.request.Request, timeout: int):
                 raise
         time.sleep((2 ** attempt) + random.uniform(0, 0.35))
 
+
+def _is_local_ollama(base_url: str) -> bool:
+    parsed = urlparse(base_url)
+    return parsed.hostname in {"localhost", "127.0.0.1", "::1"} and parsed.port == 11434
+
+
+def _chat_request(base_url: str, model: str, messages: list[dict[str, str]], timeout: int,
+                  temperature: float = 0.2, max_tokens: int = 2048, json_mode: bool = False) -> str:
+    """Call local Ollama natively, or use the configured provider's OpenAI-compatible API."""
+    if _is_local_ollama(base_url):
+        root_url = base_url.removesuffix("/v1").rstrip("/")
+        body: dict[str, Any] = {
+            "model": model, "messages": messages, "stream": False,
+            "think": False, "keep_alive": "5m",
+            "options": {"temperature": temperature, "num_predict": max_tokens},
+        }
+        if json_mode:
+            body["format"] = "json"
+        endpoint = f"{root_url}/api/chat"
+    else:
+        body = {"model": model, "temperature": temperature, "max_tokens": max_tokens,
+                "reasoning_effort": "low", "messages": messages}
+        endpoint = f"{base_url.rstrip('/')}/chat/completions"
+    request = urllib.request.Request(endpoint, data=json.dumps(body).encode("utf-8"),
+        headers={"Authorization": f"Bearer {os.getenv('LLM_API_KEY', '')}", "Content-Type": "application/json"}, method="POST")
+    with _open_with_retries(request, timeout=timeout) as response:
+        result = json.loads(response.read())
+    content = result.get("message", {}).get("content") if _is_local_ollama(base_url) else result.get("choices", [{}])[0].get("message", {}).get("content")
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError("The model returned an empty response")
+    return content.strip()
+
 def _extractive_answer(hits: list[dict[str, Any]]) -> str:
     if not hits:
         return "I could not find relevant content in the uploaded papers. Try a more specific question."
@@ -62,19 +96,13 @@ def answer(question: str, hits: list[dict[str, Any]]) -> str:
     if not api_key:
         return _extractive_answer(hits)
     base_url = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/")
-    payload = json.dumps({"model": os.getenv("LLM_MODEL", "gpt-4o-mini"), "temperature": 0.2,
-        "reasoning_effort": "low", "max_tokens": 2048,
-        "messages": [
+    model = os.getenv("LLM_MODEL", "gpt-4o-mini")
+    messages = [
             {"role": "system", "content": "You are a precise academic assistant. Answer only from supplied sources. Cite every factual claim as [n]."},
             {"role": "user", "content": f"SOURCES:\n{_context(hits)}\n\nQUESTION: {question}"}
-        ]}).encode("utf-8")
-    request = urllib.request.Request(f"{base_url}/chat/completions", data=payload,
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}, method="POST")
+        ]
     try:
-        with _open_with_retries(request, timeout=45) as response:
-            content = json.loads(response.read())["choices"][0]["message"]["content"]
-        if isinstance(content, str) and content.strip():
-            return content.strip()
+        return _chat_request(base_url, model, messages, timeout=240 if _is_local_ollama(base_url) else 45)
     except Exception:
         # Keep document chat usable when the optional LLM service is unavailable.
         logger.warning("LLM chat request failed; using retrieved passages instead", exc_info=True)
@@ -117,17 +145,14 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
         "mindmap": "Create a hierarchical concept map. Use one root node for the paper's central topic; add concise concept nodes and meaningful relationship edges. Do not use full sentences or duplicate nodes. Every edge endpoint must match a node id. Cite source page on each non-root node.",
     }
     instruction = f"{shared} {task_instructions.get(kind, 'Create concise, useful study material grounded in the sources.')} Match this structure: {shape}"
-    payload = json.dumps({"model": os.getenv("LLM_MODEL", "gpt-4o-mini"), "temperature": 0.2,
-        "reasoning_effort": "low", "max_tokens": 4096,
-        "messages": [
+    model = os.getenv("LLM_MODEL", "gpt-4o-mini")
+    messages = [
             {"role": "system", "content": "You are a precise academic learning assistant. Use only supplied source passages and return valid JSON."},
             {"role": "user", "content": f"{instruction}\n\nSOURCES:\n{_context(hits)}"}
-        ]}).encode("utf-8")
-    request = urllib.request.Request(f"{base_url}/chat/completions", data=payload,
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}, method="POST")
+        ]
     try:
-        with _open_with_retries(request, timeout=90) as response:
-            content = json.loads(response.read())["choices"][0]["message"]["content"]
+        content = _chat_request(base_url, model, messages,
+            timeout=240 if _is_local_ollama(base_url) else 90, max_tokens=2048, json_mode=True)
         if not isinstance(content, str) or not content.strip():
             logger.warning("LLM study generation returned empty content; using retrieved paper content instead")
             fallback_data["_generation_mode"] = "source_fallback"
@@ -148,7 +173,7 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
         # A model/provider response must not prevent source-based study material from being saved.
         logger.warning("LLM study generation failed; using retrieved paper content instead", exc_info=True)
         fallback_data["_generation_mode"] = "source_fallback"
-        fallback_data["_generation_notice"] = _generation_failure_reason(exc, api_key)
+        fallback_data["_generation_notice"] = _generation_failure_reason(exc, api_key, base_url, model)
         return fallback_data
 
 
@@ -197,13 +222,19 @@ def _validate_study_artifact(kind: str, result: Any, hits: list[dict[str, Any]])
             raise ValueError("Mind map concepts need relationship edges")
 
 
-def _generation_failure_reason(exc: Exception, api_key: str) -> str:
+def _generation_failure_reason(exc: Exception, api_key: str, base_url: str, model: str) -> str:
     """Return a useful short failure explanation without leaking credentials."""
+    local_ollama = _is_local_ollama(base_url)
+    provider = f"Local Ollama ({model})" if local_ollama else f"AI provider ({model})"
+    if isinstance(exc, (TimeoutError, socket.timeout)):
+        if local_ollama:
+            return f"{provider} took too long to respond. Its first run can be slow; try again after the model is warm, or request fewer items."
+        return f"{provider} timed out. Check your connection and try again."
     if isinstance(exc, urllib.error.HTTPError):
         if exc.code == 503:
-            return "Gemini is temporarily overloaded (HTTP 503). ScholarMind retried the request; wait a minute and try again."
+            return f"{provider} is temporarily overloaded (HTTP 503). ScholarMind retried the request; wait a minute and try again."
         if exc.code == 429:
-            return "Gemini rate limit or quota reached (HTTP 429). Wait for the limit to reset or check usage and billing in Google AI Studio."
+            return f"{provider} rate limit reached (HTTP 429). Wait for the limit to reset, or check the provider's usage and billing page."
         try:
             body = json.loads(exc.read().decode("utf-8", errors="replace"))
             detail = body.get("error", {}).get("message", "") if isinstance(body, dict) else ""
@@ -214,8 +245,10 @@ def _generation_failure_reason(exc: Exception, api_key: str) -> str:
             detail = "The provider did not give details."
         return f"Gemini API HTTP {exc.code}: {detail[:260]}"
     if isinstance(exc, urllib.error.URLError):
-        return "Could not reach Gemini. Check internet access and try again."
+        if local_ollama:
+            return "Could not reach Ollama at localhost:11434. Make sure the Ollama app is running, then try again."
+        return f"Could not reach {provider}. Check internet access and try again."
     if isinstance(exc, (json.JSONDecodeError, KeyError, IndexError, TypeError)):
         return "Gemini returned an unexpected response format. Try again; if it repeats, check the backend log."
     reason = str(exc).replace(api_key, "[hidden]").strip()
-    return f"Gemini response did not pass validation: {reason[:220] or type(exc).__name__}."
+    return f"{provider} response did not pass validation: {reason[:220] or type(exc).__name__}."
