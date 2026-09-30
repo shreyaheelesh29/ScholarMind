@@ -53,7 +53,7 @@ const quizQuestions = [
 export default function Learning() {
   const [availablePapers, setAvailablePapers] = useState([]);
   const [selectedPaperId, setSelectedPaperId] = useState("");
-  const [generatedCards, setGeneratedCards] = useState([]);
+  const [generatedCards, setGeneratedCards] = useState(null);
   const [generatedMindmap, setGeneratedMindmap] = useState(null);
   const [generating, setGenerating] = useState(false);
   const [generationError, setGenerationError] = useState("");
@@ -126,9 +126,9 @@ export default function Learning() {
     ["enc", "attn"], ["enc", "ffn"],
     ["dec", "mask"], ["dec", "cross"],
   ];
-  const visibleCards = generatedCards.length ? generatedCards.map((card, i) => ({ id: i + 1, front: card.front || card.question || card.title || "Study prompt", back: card.back || card.answer || card.content || "No answer supplied" })) : flashcards;
-  const mindmapNodes = generatedMindmap?.nodes?.length ? generatedMindmap.nodes.map((node, i) => ({ id: node.id || `node-${i}`, label: node.label || node.title || "Topic", x: i === 0 ? 50 : 15 + ((i * 29) % 75), y: i === 0 ? 50 : 15 + ((i * 37) % 75), color: i === 0 ? "from-primary-500 to-accent-500" : "from-primary-300 to-primary-600", size: i === 0 ? "lg" : "sm" })) : demoMindmapNodes;
-  const mindmapEdges = generatedMindmap?.edges?.length ? generatedMindmap.edges.map(edge => [edge.source, edge.target]) : demoMindmapEdges;
+  const visibleCards = generatedCards === null ? flashcards : generatedCards.map((card, i) => ({ id: i + 1, front: card.front || card.question || card.title || "Study prompt", back: card.back || card.answer || card.content || "No answer supplied" }));
+  const mindmapNodes = generatedMindmap ? (generatedMindmap.nodes || []).map((node, i) => ({ id: node.id || `node-${i}`, label: node.label || node.title || "Topic", x: i === 0 ? 50 : 15 + ((i * 29) % 75), y: i === 0 ? 50 : 15 + ((i * 37) % 75), color: i === 0 ? "from-primary-500 to-accent-500" : "from-primary-300 to-primary-600", size: i === 0 ? "lg" : "sm" })) : demoMindmapNodes;
+  const mindmapEdges = generatedMindmap ? (generatedMindmap.edges || []).map(edge => [edge.source, edge.target]) : demoMindmapEdges;
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -154,7 +154,7 @@ export default function Learning() {
 
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
         {[
-          { l: "Flashcards Mastered", v: `${Math.round((cardIdx / visibleCards.length) * 100)}%`, sub: `${cardIdx} of ${visibleCards.length}`, i: "🃏" },
+          { l: "Flashcards Mastered", v: visibleCards.length ? `${Math.round((cardIdx / visibleCards.length) * 100)}%` : "—", sub: `${Math.min(cardIdx, visibleCards.length)} of ${visibleCards.length}`, i: "🃏" },
           { l: "Quiz Score", v: `${score}/${quizQuestions.length}`, sub: quizDone ? "Complete" : "In progress", i: "✅" },
           { l: "Mind Map Topics", v: mindmapNodes.length, sub: "Key concepts linked", i: "🗺" },
           { l: "Study Time", v: "2h 14m", sub: "This week", i: "⏱" },
@@ -186,6 +186,7 @@ export default function Learning() {
 
       {tab === "cards" && (
         <div className="max-w-3xl mx-auto space-y-6">
+          {visibleCards.length === 0 ? <div className="rounded-xl border border-dashed border-slate-300 bg-white p-8 text-center text-slate-600">No validated flashcards were returned. Check that Gemini is configured in the backend, then generate again.</div> : <>
           <div className="text-center">
             <p className="text-xs font-black uppercase tracking-wider text-slate-400">Card {cardIdx + 1} of {visibleCards.length}</p>
             <div className="mt-3 h-2 w-full max-w-md mx-auto bg-slate-100 rounded-full overflow-hidden">
@@ -229,6 +230,7 @@ export default function Learning() {
               Next →
             </button>
           </div>
+          </>}
         </div>
       )}
 
@@ -324,6 +326,7 @@ export default function Learning() {
               <button className="px-3 py-1.5 rounded-md text-xs font-bold text-slate-500 hover:text-slate-700">➕ Expand</button>
             </div>
           </div>
+          {mindmapNodes.length === 0 && <p className="p-8 text-center text-slate-600">No validated mind map was returned. Check that Gemini is configured in the backend, then generate again.</p>}
           <div className="h-[600px] relative">
             <svg className="absolute inset-0 w-full h-full">
               <defs>

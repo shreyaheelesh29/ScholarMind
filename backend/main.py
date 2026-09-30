@@ -257,7 +257,16 @@ def generate_learning(payload: GenerateRequest, user: dict[str, Any] = Depends(c
         raise HTTPException(status_code=422, detail="Select at least one uploaded paper")
     papers = [owned_paper(paper_id, user) for paper_id in paper_ids]
     paper_names = ", ".join(paper["filename"] for paper in papers)
-    query = payload.prompt.strip() or f"Create {payload.kind} from {paper_names}"
+    focus = payload.prompt.strip()
+    if focus:
+        query = focus
+    else:
+        retrieval_topics = {
+            "quiz": "important concepts definitions methods results findings conclusions limitations",
+            "flashcards": "key concepts definitions terminology methods findings takeaways",
+            "mindmap": "central topic key concepts themes methods results relationships",
+        }
+        query = f"{retrieval_topics.get(payload.kind, f'key findings and main ideas')} from {paper_names}"
     hits = hybrid_search(query, embed([query])[0], paper_ids, min(payload.count, 10), owner_id=user["id"])
     if not hits:
         raise HTTPException(status_code=404, detail="No text passages found for this paper")
