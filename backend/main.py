@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import uuid
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +24,7 @@ from database import (create_user, find_user_by_email, get_paper, get_user, hybr
                       mark_user_notifications_read, update_user_settings, record_activity, record_login, save_artifact,
                       save_paper_annotation, delete_paper_annotation,
                       save_chat_message, save_chunks, save_paper, sync_admin_emails)
-from rag import answer, citations_for, embed, generate_study_artifact
+from rag import answer, citations_for, embed, embed_query, generate_study_artifact
 
 BASE_DIR = Path(__file__).resolve().parent
 PAPERS_DIR = BASE_DIR / "data" / "papers"
@@ -60,7 +61,7 @@ class GenerateRequest(BaseModel):
     paper_id: str | None = None
     paper_ids: list[str] | None = Field(default=None, max_length=10)
     prompt: str = Field(default="", max_length=1000)
-    count: int = Field(default=8, ge=1, le=20)
+    count: int = Field(default=6, ge=1, le=20)
 
 
 class ArtifactUpdate(BaseModel):
@@ -113,6 +114,7 @@ def owned_paper(paper_id: str, user: dict[str, Any]) -> dict[str, Any]:
     return paper
 
 
+@lru_cache(maxsize=128)
 def pdf_index(file_path: str) -> dict[str, Any]:
     """Return real PDF bookmarks and a page index with headings detected from page text."""
     with pymupdf.open(file_path) as document:
@@ -334,7 +336,7 @@ def paper_file(paper_id: str, user: dict[str, Any] = Depends(current_user)):
 
 
 @app.post("/api/papers/upload", status_code=201)
-async def upload_paper(file: UploadFile = File(...), user: dict[str, Any] = Depends(current_user)):
+def upload_paper(file: UploadFile = File(...), user: dict[str, Any] = Depends(current_user)):
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=415, detail="Only PDF files are allowed")
     paper_id, safe_name = str(uuid.uuid4()), Path(file.filename).name
@@ -369,12 +371,14 @@ def chat(request: ChatRequest, user: dict[str, Any] = Depends(current_user)):
     if request.paper_ids:
         for paper_id in request.paper_ids:
             owned_paper(paper_id, user)
-    hits = hybrid_search(request.question, embed([request.question])[0], request.paper_ids, request.top_k, owner_id=user["id"])
+    hits = hybrid_search(request.question, embed_query(request.question), request.paper_ids, request.top_k, owner_id=user["id"])
     citations = citations_for(hits)
     session = None
     history: list[dict[str, str]] = []
     if request.session_id:
-        session = get_user_chat(user["id"], request.session_id)
+        # Only recent turns are sent back to the model. Fetching the full transcript
+        # on every turn gets slower as a chat grows.
+        session = get_user_chat(user["id"], request.session_id, message_limit=8)
         if not session:
             raise HTTPException(status_code=404, detail="Chat not found")
         history = [{"role": message["role"], "content": message["content"]}
@@ -416,7 +420,7 @@ def generate_learning(payload: GenerateRequest, user: dict[str, Any] = Depends(c
         query = focus
     else:
         query = f"key findings and main ideas from {paper_names}"
-    query_embedding = embed([query])[0]
+    query_embedding = embed_query(query)
     cross_paper_kinds = {"comparison", "literature_review", "research_gap", "research_ideas"}
     if payload.kind in cross_paper_kinds and len(paper_ids) > 1:
         # Retrieve independently per selected paper so a single document cannot crowd out the others.

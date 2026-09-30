@@ -346,16 +346,22 @@ def list_user_chats(user_id: str) -> list[dict[str, Any]]:
         return list(cursor.fetchall())
 
 
-def get_user_chat(user_id: str, chat_id: str) -> dict[str, Any] | None:
+def get_user_chat(user_id: str, chat_id: str, message_limit: int | None = None) -> dict[str, Any] | None:
     with connection() as conn, conn.cursor(row_factory=psycopg.rows.dict_row) as cursor:
         cursor.execute("""SELECT id::text, paper_id::text, title, created_at, updated_at
                        FROM chat_sessions WHERE id = %s AND user_id = %s""", (chat_id, user_id))
         session = cursor.fetchone()
         if not session:
             return None
-        cursor.execute("""SELECT id, role, content, citations, sources, created_at
-                       FROM chat_messages WHERE session_id = %s ORDER BY id""", (chat_id,))
-        session["messages"] = list(cursor.fetchall())
+        if message_limit is not None:
+            cursor.execute("""SELECT id, role, content, citations, sources, created_at
+                           FROM chat_messages WHERE session_id = %s ORDER BY id DESC LIMIT %s""",
+                           (chat_id, max(1, message_limit)))
+            session["messages"] = list(reversed(cursor.fetchall()))
+        else:
+            cursor.execute("""SELECT id, role, content, citations, sources, created_at
+                           FROM chat_messages WHERE session_id = %s ORDER BY id""", (chat_id,))
+            session["messages"] = list(cursor.fetchall())
         return session
 
 

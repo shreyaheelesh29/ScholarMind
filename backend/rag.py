@@ -24,7 +24,17 @@ def embedding_model() -> Any:
     return SentenceTransformer(os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2"))
 
 def embed(texts: list[str]) -> list[list[float]]:
-    return embedding_model().encode(texts, normalize_embeddings=True, show_progress_bar=False).tolist()
+    # Larger batches reduce the number of model passes when indexing a PDF.
+    return embedding_model().encode(texts, batch_size=64, normalize_embeddings=True, show_progress_bar=False).tolist()
+
+@lru_cache(maxsize=512)
+def _cached_query_embedding(text: str) -> tuple[float, ...]:
+    vector = embedding_model().encode([text], normalize_embeddings=True, show_progress_bar=False)[0]
+    return tuple(float(value) for value in vector)
+
+def embed_query(text: str) -> list[float]:
+    """Reuse vectors for repeated questions/focus prompts within this backend process."""
+    return list(_cached_query_embedding(text.strip()))
 
 def citations_for(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [{"number": i, "paper_id": h["paper_id"], "paperTitle": h["filename"],
@@ -217,16 +227,24 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
     }
     instruction = f"{shared} {task_instructions.get(kind, 'Create concise, useful study material grounded in the sources.')} Match this structure: {shape}"
     model = os.getenv("LLM_MODEL", "gpt-4o-mini")
+    generation_tokens = {
+        "flashcards": 900, "mindmap": 1000, "quiz": 1400,
+        "visualization": 1000, "viva": 1200, "summary": 1200,
+        "report": 1500, "ppt_outline": 1500, "literature_review": 1700,
+        "comparison": 1600, "research_gap": 1500, "research_ideas": 1700,
+    }
+    context_chars = 1300 if kind in {"flashcards", "mindmap", "quiz", "visualization", "viva"} else 1800
     messages = [
             {"role": "system", "content": "You are a precise academic learning assistant. Use only supplied source passages and return valid JSON."},
-            {"role": "user", "content": f"{instruction}\n\nSOURCES:\n{_context(hits)}"}
+            {"role": "user", "content": f"{instruction}\n\nSOURCES:\n{_context(hits, max_chars=context_chars)}"}
         ]
     try:
         content = _chat_request(base_url, model, messages,
-            timeout=240 if _is_local_ollama(base_url) else 90,
-            max_tokens=3072 if kind == "mindmap" else 2048,
+            timeout=120 if _is_local_ollama(base_url) else 45,
+            max_tokens=generation_tokens.get(kind, 1600),
             json_mode=kind != "mindmap",
-            json_schema=_mindmap_schema() if kind == "mindmap" and _is_local_ollama(base_url) else None)
+            json_schema=_mindmap_schema() if kind == "mindmap" and _is_local_ollama(base_url) else None,
+            attempts=1)
         if not isinstance(content, str) or not content.strip():
             logger.warning("LLM study generation returned empty content; using retrieved paper content instead")
             fallback_data["_generation_mode"] = "source_fallback"
@@ -463,7 +481,7 @@ def _generation_failure_reason(exc: Exception, api_key: str, base_url: str, mode
         return f"{provider} timed out. Check your connection and try again."
     if isinstance(exc, urllib.error.HTTPError):
         if exc.code == 503:
-            return f"{provider} is temporarily overloaded (HTTP 503). ScholarMind retried the request; wait a minute and try again."
+            return f"{provider} is temporarily overloaded (HTTP 503). Try again in a minute."
         if exc.code == 429:
             return f"{provider} rate limit reached (HTTP 429). Wait for the limit to reset, or check the provider's usage and billing page."
         try:

@@ -40,9 +40,8 @@ export default function PdfViewer() {
 
     const loadPaper = async () => {
       try {
-        const [details, index, annotationData, response] = await Promise.all([
+        const [details, annotationData, response] = await Promise.all([
           apiFetch(`/papers/${encodeURIComponent(paperId)}`),
-          apiFetch(`/papers/${encodeURIComponent(paperId)}/index`),
           apiFetch(`/papers/${encodeURIComponent(paperId)}/annotations`),
           fetch(`/api/papers/${encodeURIComponent(paperId)}/file`, {
             headers: { Authorization: `Bearer ${localStorage.getItem("scholarmind_token") || ""}` },
@@ -55,11 +54,15 @@ export default function PdfViewer() {
         objectUrl = URL.createObjectURL(await response.blob());
         if (!cancelled) {
           setPaper(details);
-          setPdfIndex(index);
           setAnnotations(annotationData.annotations || []);
           setCurrentPage(Math.min(Math.max(requestedPage, 1), details.page_count || 1));
           setPdfUrl(objectUrl);
         }
+        // The PDF can render as soon as its file and metadata arrive. Loading
+        // and parsing the document outline should not hold the viewer hostage.
+        apiFetch(`/papers/${encodeURIComponent(paperId)}/index`)
+          .then((index) => { if (!cancelled) setPdfIndex(index); })
+          .catch(() => {});
       } catch (loadError) {
         if (!cancelled) setError(loadError.message || "Could not load this PDF.");
       }

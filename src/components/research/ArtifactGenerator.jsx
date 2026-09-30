@@ -95,7 +95,7 @@ export default function ArtifactGenerator({ kinds, heading = "Generate from your
     try {
       const result = await apiFetch("/learning/generate", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ kind, paper_id: paperIds[0], paper_ids: paperIds, prompt: [promptContext, prompt].filter(Boolean).join("\n\n"), count: 8 }),
+        body: JSON.stringify({ kind, paper_id: paperIds[0], paper_ids: paperIds, prompt: [promptContext, prompt].filter(Boolean).join("\n\n"), count: 6 }),
       });
       setArtifact(result.artifact);
     } catch (err) { setError(err.message); }
