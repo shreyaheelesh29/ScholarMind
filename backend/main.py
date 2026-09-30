@@ -27,7 +27,7 @@ BASE_DIR = Path(__file__).resolve().parent
 PAPERS_DIR = BASE_DIR / "data" / "papers"
 MAX_UPLOAD_BYTES = 100 * 1024 * 1024
 AUTH = HTTPBearer(auto_error=False)
-ARTIFACT_TYPES = {"flashcards", "mindmap", "quiz", "summary", "report", "ppt_outline", "viva", "literature_review", "visualization"}
+ARTIFACT_TYPES = {"flashcards", "mindmap", "quiz", "summary", "report", "ppt_outline", "viva", "literature_review", "visualization", "comparison", "research_gap", "research_ideas"}
 
 app = FastAPI(title="ScholarMind Backend", version="1.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:5173").split(","),
@@ -54,7 +54,7 @@ class ChatRequest(BaseModel):
 
 
 class GenerateRequest(BaseModel):
-    kind: str = Field(pattern="^(flashcards|mindmap|quiz|summary|report|ppt_outline|viva|literature_review|visualization)$")
+    kind: str = Field(pattern="^(flashcards|mindmap|quiz|summary|report|ppt_outline|viva|literature_review|visualization|comparison|research_gap|research_ideas)$")
     paper_id: str | None = None
     paper_ids: list[str] | None = Field(default=None, max_length=10)
     prompt: str = Field(default="", max_length=1000)
@@ -317,16 +317,32 @@ def generate_learning(payload: GenerateRequest, user: dict[str, Any] = Depends(c
     papers = [owned_paper(paper_id, user) for paper_id in paper_ids]
     paper_names = ", ".join(paper["filename"] for paper in papers)
     focus = payload.prompt.strip()
-    if focus:
-        query = focus
-    else:
-        retrieval_topics = {
+    retrieval_topics = {
             "quiz": "important concepts definitions methods results findings conclusions limitations",
             "flashcards": "key concepts definitions terminology methods findings takeaways",
             "mindmap": "central topic key concepts themes methods results relationships",
-        }
-        query = f"{retrieval_topics.get(payload.kind, f'key findings and main ideas')} from {paper_names}"
-    hits = hybrid_search(query, embed([query])[0], paper_ids, min(payload.count, 10), owner_id=user["id"])
+            "comparison": "research objectives methodology datasets experiments results limitations contributions",
+            "literature_review": "research themes methods findings results limitations trends",
+            "research_gap": "limitations unresolved questions future work missing evidence contradictory findings",
+            "research_ideas": "limitations unresolved questions future work methods findings",
+    }
+    topic_query = retrieval_topics.get(payload.kind)
+    if topic_query:
+        query = f"{topic_query} {focus} from {paper_names}".strip()
+    elif focus:
+        query = focus
+    else:
+        query = f"key findings and main ideas from {paper_names}"
+    query_embedding = embed([query])[0]
+    cross_paper_kinds = {"comparison", "literature_review", "research_gap", "research_ideas"}
+    if payload.kind in cross_paper_kinds and len(paper_ids) > 1:
+        # Retrieve independently per selected paper so a single document cannot crowd out the others.
+        per_paper_limit = max(1, min(4, payload.count // len(paper_ids)))
+        hits = []
+        for selected_id in paper_ids:
+            hits.extend(hybrid_search(query, query_embedding, [selected_id], per_paper_limit, owner_id=user["id"]))
+    else:
+        hits = hybrid_search(query, query_embedding, paper_ids, min(payload.count, 10), owner_id=user["id"])
     if not hits:
         raise HTTPException(status_code=404, detail="No text passages found for this paper")
     try:

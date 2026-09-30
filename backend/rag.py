@@ -156,10 +156,20 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
     elif kind == "quiz":
         fallback_data = {"questions": []}
         shape = '{"questions":[{"question":"A clear question testing understanding, not a copied sentence","options":["Plausible answer A","Plausible answer B","Plausible answer C","Plausible answer D"],"answer":0,"explanation":"Why this is correct, grounded in the paper","page":1}]}'
-    elif kind in {"summary", "report", "ppt_outline", "viva", "literature_review", "visualization"}:
-        field = {"summary": "summary", "report": "sections", "ppt_outline": "slides", "viva": "questions", "literature_review": "sections", "visualization": "visualizations"}[kind]
+    elif kind in {"summary", "report", "ppt_outline", "viva", "literature_review", "visualization", "comparison", "research_gap", "research_ideas"}:
+        field = {"summary": "summary", "report": "sections", "ppt_outline": "slides", "viva": "questions", "literature_review": "sections", "visualization": "visualizations", "comparison": "comparisons", "research_gap": "gaps", "research_ideas": "ideas"}[kind]
         fallback_data = {field: [{"title": h["section"], "content": h["content"][:1400], "page": h["page_number"], "speaker_notes": h["content"][:500] if kind == "ppt_outline" else None} for h in hits[:count]]}
-        shape = "JSON object with the requested structured content; PPT slides should each include speaker_notes."
+        shape = {
+            "summary": '{"summary":"...", "key_points":[{"title":"...","content":"...","page":1}]}',
+            "report": '{"sections":[{"title":"...","content":"...","page":1}]}',
+            "ppt_outline": '{"slides":[{"title":"...","content":"...","page":1,"speaker_notes":"..."}]}',
+            "viva": '{"questions":[{"question":"...","answer":"...","page":1}]}',
+            "literature_review": '{"sections":[{"title":"Theme...","content":"Synthesis across the selected papers...","sources":[{"paper":"filename.pdf","page":1}]}]}',
+            "visualization": '{"visualizations":[{"title":"...","content":"...","page":1}]}',
+            "comparison": '{"comparisons":[{"criterion":"Methodology","paper_findings":[{"paper":"filename.pdf","finding":"...","page":1}],"synthesis":"Similarities and differences supported by the cited findings."}]}',
+            "research_gap": '{"gaps":[{"title":"...","evidence":"What the selected papers state or omit","why_it_matters":"...","proposed_direction":"...","sources":[{"paper":"filename.pdf","page":1}]}]}',
+            "research_ideas": '{"ideas":[{"title":"...","research_question":"...","motivation":"Gap evidenced in selected papers...","methodology":"...","evaluation":"...","risks":"...","sources":[{"paper":"filename.pdf","page":1}]}]}',
+        }[kind]
     else:
         raise ValueError("Unsupported study artifact type")
 
@@ -183,6 +193,10 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
         "quiz": "Create multiple-choice questions that test distinct, important concepts from this paper. Every question must be answerable from the cited passage. Provide exactly four different, plausible options; exactly one is correct. `answer` is the zero-based index (0-3) of that correct option. Explanation must justify the answer using the paper, not merely repeat the answer.",
         "flashcards": "Create study flashcards, one concept per card. `front` must be a direct, self-contained question. `back` must state the correct answer concisely in your own words, adding a key detail only when supported. Avoid vague prompts and duplicated concepts.",
         "mindmap": "Return a complete map, never only a title or root: exactly one root plus at least four distinct, paper-specific concepts and four or more labeled links. Use concise concept labels of 2-8 words, using terminology actually present in the passages. Do not add page or quote fields; those are matched to the source by the application. Every node must connect to the root.",
+        "comparison": "Compare only the selected papers represented in SOURCES. Cover shared and differing objectives, methods, data/evaluation, results, and limitations where the text supports them. Each paper_findings entry must name the exact source filename and page. Do not invent scores or rank papers; state when a criterion is not reported.",
+        "literature_review": "Write a concise thematic synthesis across the selected uploaded papers, not a list of summaries. Each section must cite the exact filenames and page numbers that support it. Describe agreements, disagreements, and trends only when the supplied passages support them. Do not cite papers absent from SOURCES.",
+        "research_gap": "Infer only cautious candidate gaps from explicit limitations, future-work statements, disagreements, or topics absent in the supplied excerpts. Do not claim a gap is novel or absent from all research. Explain the evidence and list exact source filenames and pages. If evidence is insufficient, return an empty gaps array.",
+        "research_ideas": "Propose feasible candidate ideas motivated by the supplied paper evidence and stated gaps. Clearly label them as proposals, not proven novel contributions. Respect requested novelty/difficulty. Include testable research questions, method, evaluation, risks, and exact source filenames/pages. Do not invent datasets or results.",
     }
     instruction = f"{shared} {task_instructions.get(kind, 'Create concise, useful study material grounded in the sources.')} Match this structure: {shape}"
     model = os.getenv("LLM_MODEL", "gpt-4o-mini")
@@ -374,6 +388,52 @@ def _validate_study_artifact(kind: str, result: Any, hits: list[dict[str, Any]])
                     pending.append(child)
         if reached != ids:
             raise ValueError("Every mind map concept must connect back to the root")
+    elif kind in {"comparison", "literature_review", "research_gap", "research_ideas"}:
+        fields = {"comparison": "comparisons", "literature_review": "sections", "research_gap": "gaps", "research_ideas": "ideas"}
+        items = result.get(fields[kind])
+        if not isinstance(items, list) or (not items and kind != "research_gap"):
+            raise ValueError(f"The generated {kind.replace('_', ' ')} has no usable results")
+
+        valid_sources = {(str(hit["filename"]), int(hit["page_number"])) for hit in hits}
+
+        def check_sources(references: Any) -> set[str]:
+            if not isinstance(references, list) or not references:
+                raise ValueError("Each analysis claim needs at least one source filename and page")
+            referenced_papers = set()
+            for reference in references:
+                if not isinstance(reference, dict):
+                    raise ValueError("Analysis source references must include a paper filename and page")
+                paper_name = reference.get("paper")
+                page = reference.get("page")
+                if not isinstance(paper_name, str) or type(page) is not int or (paper_name, page) not in valid_sources:
+                    raise ValueError("An analysis source citation does not match the selected paper passages")
+                referenced_papers.add(paper_name)
+            return referenced_papers
+
+        if kind == "comparison":
+            cited_papers = set()
+            for item in items:
+                if not isinstance(item, dict) or not isinstance(item.get("criterion"), str) or not isinstance(item.get("synthesis"), str):
+                    raise ValueError("Comparison criteria need a synthesis grounded in selected papers")
+                findings = item.get("paper_findings")
+                if not isinstance(findings, list) or len(findings) < 2:
+                    raise ValueError("Each comparison needs evidence from at least two papers")
+                for finding in findings:
+                    if not isinstance(finding, dict) or not isinstance(finding.get("finding"), str):
+                        raise ValueError("Each paper comparison needs a supported finding")
+                    cited_papers.update(check_sources([{"paper": finding.get("paper"), "page": finding.get("page")}]))
+            if len(cited_papers) < 2:
+                raise ValueError("Comparison evidence must cover at least two selected papers")
+        else:
+            required_fields = {
+                "literature_review": ("title", "content"),
+                "research_gap": ("title", "evidence", "proposed_direction"),
+                "research_ideas": ("title", "research_question", "methodology"),
+            }[kind]
+            for item in items:
+                if not isinstance(item, dict) or any(not isinstance(item.get(field), str) or len(item[field].strip()) < 8 for field in required_fields):
+                    raise ValueError(f"Each {kind.replace('_', ' ')} item needs its required analysis fields")
+                check_sources(item.get("sources"))
 
 
 def _generation_failure_reason(exc: Exception, api_key: str, base_url: str, model: str) -> str:
