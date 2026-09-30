@@ -1,28 +1,37 @@
+import { lazy, Suspense } from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import AppLayout from "./components/layout/AppLayout";
-import Login from "./pages/Login";
-import Register from "./pages/Register";
-import Dashboard from "./pages/Dashboard";
-import UploadPaper from "./pages/UploadPaper";
-import PapersList from "./pages/PapersList";
-import PdfViewer from "./pages/PdfViewer";
-import Chat from "./pages/Chat";
-import PaperSummary from "./pages/PaperSummary";
-import PaperComparison from "./pages/PaperComparison";
-import LiteratureReview from "./pages/LiteratureReview";
-import ResearchGap from "./pages/ResearchGap";
-import ResearchIdeas from "./pages/ResearchIdeas";
-import PPTInterface from "./pages/PPTInterface";
-import VivaPrep from "./pages/VivaPrep";
-import Learning from "./pages/Learning";
-import Settings from "./pages/Settings";
-import MyData from "./pages/MyData";
-import Admin from "./pages/Admin";
+
+const Login = lazy(() => import("./pages/Login"));
+const Register = lazy(() => import("./pages/Register"));
+const Dashboard = lazy(() => import("./pages/Dashboard"));
+const UploadPaper = lazy(() => import("./pages/UploadPaper"));
+const PapersList = lazy(() => import("./pages/PapersList"));
+const PdfViewer = lazy(() => import("./pages/PdfViewer"));
+const Chat = lazy(() => import("./pages/Chat"));
+const PaperSummary = lazy(() => import("./pages/PaperSummary"));
+const PaperComparison = lazy(() => import("./pages/PaperComparison"));
+const LiteratureReview = lazy(() => import("./pages/LiteratureReview"));
+const ResearchGap = lazy(() => import("./pages/ResearchGap"));
+const ResearchIdeas = lazy(() => import("./pages/ResearchIdeas"));
+const PPTInterface = lazy(() => import("./pages/PPTInterface"));
+const VivaPrep = lazy(() => import("./pages/VivaPrep"));
+const Learning = lazy(() => import("./pages/Learning"));
+const Settings = lazy(() => import("./pages/Settings"));
+const MyData = lazy(() => import("./pages/MyData"));
+const Admin = lazy(() => import("./pages/Admin"));
 
 export default function App() {
   return (
     <BrowserRouter>
-      <Routes>
+      <Suspense
+        fallback={
+          <div className="grid min-h-screen place-items-center text-sm font-medium text-slate-500" role="status">
+            Loading ScholarMind…
+          </div>
+        }
+      >
+        <Routes>
         <Route path="/" element={<Navigate to="/dashboard" replace />} />
         <Route path="/login" element={<Login />} />
         <Route path="/register" element={<Register />} />
@@ -157,7 +166,8 @@ export default function App() {
         <Route path="/admin" element={<AppLayout><Admin /></AppLayout>} />
 
         <Route path="*" element={<Navigate to="/dashboard" replace />} />
-      </Routes>
+        </Routes>
+      </Suspense>
     </BrowserRouter>
   );
 }

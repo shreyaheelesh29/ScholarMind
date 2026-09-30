@@ -8,12 +8,13 @@ import urllib.request
 from functools import lru_cache
 from typing import Any
 
-from sentence_transformers import SentenceTransformer
-
 logger = logging.getLogger(__name__)
 
 @lru_cache(maxsize=1)
-def embedding_model() -> SentenceTransformer:
+def embedding_model() -> Any:
+    # Delay importing Torch/Sentence Transformers until a paper actually needs indexing.
+    from sentence_transformers import SentenceTransformer
+
     return SentenceTransformer(os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2"))
 
 def embed(texts: list[str]) -> list[list[float]]:
