@@ -69,7 +69,7 @@ export default function Learning() {
     if (!selectedPaperId) { setGenerationError("Upload a paper first, then choose it here."); return; }
     setGenerating(true); setGenerationError(""); setGenerationMode(""); setGenerationNotice("");
     try {
-      const result = await apiFetch("/learning/generate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind, paper_id: selectedPaperId, count: 8 }) });
+      const result = await apiFetch("/learning/generate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind, paper_id: selectedPaperId, count: kind === "mindmap" ? 6 : 8 }) });
       const payload = result.artifact.payload || {};
       setGenerationMode(payload._generation_mode || "");
       setGenerationNotice(payload._generation_notice || "");
@@ -127,8 +127,16 @@ export default function Learning() {
     ["dec", "mask"], ["dec", "cross"],
   ];
   const visibleCards = generatedCards === null ? flashcards : generatedCards.map((card, i) => ({ id: i + 1, front: card.front || card.question || card.title || "Study prompt", back: card.back || card.answer || card.content || "No answer supplied" }));
-  const mindmapNodes = generatedMindmap ? (generatedMindmap.nodes || []).map((node, i) => ({ id: node.id || `node-${i}`, label: node.label || node.title || "Topic", x: i === 0 ? 50 : 15 + ((i * 29) % 75), y: i === 0 ? 50 : 15 + ((i * 37) % 75), color: i === 0 ? "from-primary-500 to-accent-500" : "from-primary-300 to-primary-600", size: i === 0 ? "lg" : "sm" })) : demoMindmapNodes;
-  const mindmapEdges = generatedMindmap ? (generatedMindmap.edges || []).map(edge => [edge.source, edge.target]) : demoMindmapEdges;
+  const mindmapNodes = generatedMindmap ? (generatedMindmap.nodes || []).map((node, i, nodes) => {
+    const isRoot = node.id === "root";
+    const childIndex = isRoot ? 0 : nodes.slice(0, i).filter((item) => item.id !== "root").length;
+    const childCount = Math.max(nodes.length - 1, 1);
+    const angle = -Math.PI / 2 + (childIndex * 2 * Math.PI) / childCount;
+    return { id: node.id || `node-${i}`, label: node.label || node.title || "Topic", page: node.page, evidence: node.evidence,
+      x: isRoot ? 50 : 50 + 34 * Math.cos(angle), y: isRoot ? 50 : 50 + 37 * Math.sin(angle),
+      color: isRoot ? "from-primary-500 to-accent-500" : "from-primary-300 to-primary-600", size: isRoot ? "lg" : "sm" };
+  }) : demoMindmapNodes;
+  const mindmapEdges = generatedMindmap ? (generatedMindmap.edges || []) : demoMindmapEdges.map(([source, target]) => ({ source, target, label: "" }));
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -318,7 +326,7 @@ export default function Learning() {
           <div className="p-5 border-b border-slate-200 bg-white flex items-center justify-between">
             <div>
               <h3 className="font-black text-xl text-slate-900">{generatedMindmap ? "Generated Paper Mind Map" : "Transformer Architecture Mind Map"}</h3>
-              <p className="text-sm text-slate-500">Click nodes to explore sub-topics • Drag canvas to pan (conceptual visualization)</p>
+              <p className="text-sm text-slate-500">Each concept cites its paper page. Hover over a node to inspect the supporting passage.</p>
             </div>
             <div className="flex gap-1 p-1 rounded-lg bg-slate-100">
               <button className="px-3 py-1.5 rounded-md bg-white shadow-sm text-xs font-bold text-primary-700">🔭 Explore</button>
@@ -326,7 +334,7 @@ export default function Learning() {
               <button className="px-3 py-1.5 rounded-md text-xs font-bold text-slate-500 hover:text-slate-700">➕ Expand</button>
             </div>
           </div>
-          {mindmapNodes.length === 0 && <p className="p-8 text-center text-slate-600">No validated mind map was returned. Check that Gemini is configured in the backend, then generate again.</p>}
+          {mindmapNodes.length === 0 && <p className="p-8 text-center text-slate-600">No validated mind map was returned. Check your configured AI model, then generate again.</p>}
           <div className="h-[600px] relative">
             <svg className="absolute inset-0 w-full h-full">
               <defs>
@@ -334,19 +342,24 @@ export default function Learning() {
                   <polygon points="0 0, 10 3.5, 0 7" fill="#cbd5e1" />
                 </marker>
               </defs>
-              {mindmapEdges.map(([a, b], i) => {
-                const na = mindmapNodes.find(n => n.id === a);
-                const nb = mindmapNodes.find(n => n.id === b);
-                return na && nb && <line key={i} x1={`${na.x}%`} y1={`${na.y}%`} x2={`${nb.x}%`} y2={`${nb.y}%`} stroke="#cbd5e1" strokeWidth="2" strokeDasharray="6 4" markerEnd="url(#arrow)" />;
+              {mindmapEdges.map((edge, i) => {
+                const na = mindmapNodes.find(n => n.id === edge.source);
+                const nb = mindmapNodes.find(n => n.id === edge.target);
+                if (!na || !nb) return null;
+                return <g key={i}>
+                  <line x1={`${na.x}%`} y1={`${na.y}%`} x2={`${nb.x}%`} y2={`${nb.y}%`} stroke="#cbd5e1" strokeWidth="2" markerEnd="url(#arrow)" />
+                  {edge.label && <text x={`${(na.x + nb.x) / 2}%`} y={`${(na.y + nb.y) / 2}%`} textAnchor="middle" className="fill-slate-500" fontSize="11">{edge.label}</text>}
+                </g>;
               })}
             </svg>
             {mindmapNodes.map(n => (
               <div key={n.id} className="absolute -translate-x-1/2 -translate-y-1/2 cursor-pointer group" style={{ left: `${n.x}%`, top: `${n.y}%` }}>
                 <div className={`rounded-2xl bg-gradient-to-br ${n.color} text-white shadow-xl shadow-primary-500/20 hover:scale-110 hover:shadow-2xl hover:shadow-primary-500/40 transition-all ${n.size === "lg" ? "px-7 py-5" : n.size === "md" ? "px-5 py-3.5" : "px-4 py-2.5"}`}>
                   <p className={`font-black whitespace-nowrap text-white ${n.size === "lg" ? "text-2xl" : n.size === "md" ? "text-lg" : "text-sm"}`}>{n.label}</p>
+                  {n.page && <p className="mt-1 text-center text-xs font-semibold text-white/80">Source · p. {n.page}</p>}
                 </div>
-                <div className="absolute left-1/2 -translate-x-1/2 top-full mt-2 rounded-lg bg-slate-900 text-white text-xs px-3 py-1.5 opacity-0 group-hover:opacity-100 transition pointer-events-none whitespace-nowrap">
-                  Click to learn more
+                <div className="absolute left-1/2 z-10 w-64 -translate-x-1/2 top-full mt-2 rounded-lg bg-slate-900 text-white text-xs px-3 py-2 opacity-0 group-hover:opacity-100 transition pointer-events-none whitespace-normal shadow-lg">
+                  <span className="font-semibold">Evidence from p. {n.page}: </span>{n.evidence || "Demo concept"}
                 </div>
               </div>
             ))}

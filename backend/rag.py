@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import random
+import re
 import socket
 import time
 import urllib.error
@@ -36,7 +37,7 @@ def _context(hits: list[dict[str, Any]]) -> str:
 
 
 def _open_with_retries(request: urllib.request.Request, timeout: int):
-    """Retry only transient Gemini errors, following exponential backoff guidance."""
+    """Retry transient provider errors with bounded exponential backoff."""
     for attempt in range(3):
         try:
             return urllib.request.urlopen(request, timeout=timeout)
@@ -118,7 +119,7 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
         shape = '{"cards":[{"front":"A focused question testing one concept","back":"A concise, accurate answer supported by the paper","page":1}]}'
     elif kind == "mindmap":
         fallback_data = {"nodes": [], "edges": []}
-        shape = '{"nodes":[{"id":"root","label":"Central topic","page":1},{"id":"concept-1","label":"Concise concept","page":2}],"edges":[{"source":"root","target":"concept-1","label":"explains"}]}'
+        shape = '{"nodes":[{"id":"root","label":"Paper central topic","page":1,"evidence":"Exact short supporting quote from the cited page"},{"id":"concept-1","label":"Specific concept","page":2,"evidence":"Exact short supporting quote from the cited page"}],"edges":[{"source":"root","target":"concept-1","label":"explains"}]}'
     elif kind == "quiz":
         fallback_data = {"questions": []}
         shape = '{"questions":[{"question":"A clear question testing understanding, not a copied sentence","options":["Plausible answer A","Plausible answer B","Plausible answer C","Plausible answer D"],"answer":0,"explanation":"Why this is correct, grounded in the paper","page":1}]}'
@@ -132,7 +133,7 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
     api_key = os.getenv("LLM_API_KEY")
     if not api_key:
         fallback_data["_generation_mode"] = "source_fallback"
-        fallback_data["_generation_notice"] = ("AI generation is not configured. No quiz, flashcards, or mind map were fabricated; configure Gemini and generate again."
+        fallback_data["_generation_notice"] = ("AI generation is not configured. No quiz, flashcards, or mind map were fabricated; configure an AI provider and generate again."
             if kind in {"quiz", "flashcards", "mindmap"} else "AI generation is not configured. This is extracted source material, not a generated " + kind.replace("_", " ") + ".")
         return fallback_data
     base_url = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/")
@@ -142,7 +143,7 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
     task_instructions = {
         "quiz": "Create multiple-choice questions that test distinct, important concepts from this paper. Every question must be answerable from the cited passage. Provide exactly four different, plausible options; exactly one is correct. `answer` is the zero-based index (0-3) of that correct option. Explanation must justify the answer using the paper, not merely repeat the answer.",
         "flashcards": "Create study flashcards, one concept per card. `front` must be a direct, self-contained question. `back` must state the correct answer concisely in your own words, adding a key detail only when supported. Avoid vague prompts and duplicated concepts.",
-        "mindmap": "Create a hierarchical concept map. Use one root node for the paper's central topic; add concise concept nodes and meaningful relationship edges. Do not use full sentences or duplicate nodes. Every edge endpoint must match a node id. Cite source page on each non-root node.",
+        "mindmap": "Build a useful concept map, not just a title. Return one root plus at least 4 and up to 8 distinct, important concepts supported by the supplied passages. Each node label should be a concise concept (2-8 words), never a copied sentence. For EVERY node include the exact source page number and an evidence quote copied verbatim from that page (20-180 characters). Connect all concepts in a hierarchy with meaningful, short edge labels (for example: 'contains', 'enables', 'measured by'). Every non-root node must be reachable from root. If the passages do not support four concepts, still use only supported concepts; validation will report insufficient evidence rather than inventing topics.",
     }
     instruction = f"{shared} {task_instructions.get(kind, 'Create concise, useful study material grounded in the sources.')} Match this structure: {shape}"
     model = os.getenv("LLM_MODEL", "gpt-4o-mini")
@@ -152,18 +153,19 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
         ]
     try:
         content = _chat_request(base_url, model, messages,
-            timeout=240 if _is_local_ollama(base_url) else 90, max_tokens=2048, json_mode=True)
+            timeout=240 if _is_local_ollama(base_url) else 90,
+            max_tokens=3072 if kind == "mindmap" else 2048, json_mode=True)
         if not isinstance(content, str) or not content.strip():
             logger.warning("LLM study generation returned empty content; using retrieved paper content instead")
             fallback_data["_generation_mode"] = "source_fallback"
-            fallback_data["_generation_notice"] = "Gemini returned no usable content. No quiz, flashcards, or mind map were fabricated; check the backend window and generate again."
+            fallback_data["_generation_notice"] = "The AI model returned no usable content. No quiz, flashcards, or mind map were fabricated; try again."
             return fallback_data
         content = content.strip()
         start, end = content.find("{"), content.rfind("}")
         if start < 0 or end < start:
             logger.warning("LLM study generation returned non-JSON content; using retrieved paper content instead")
             fallback_data["_generation_mode"] = "source_fallback"
-            fallback_data["_generation_notice"] = "Gemini returned an unusable response. No quiz, flashcards, or mind map were fabricated; check the backend window and generate again."
+            fallback_data["_generation_notice"] = "The AI model returned an unusable response. No quiz, flashcards, or mind map were fabricated; try again."
             return fallback_data
         result = json.loads(content[start:end + 1])
         _validate_study_artifact(kind, result, hits)
@@ -209,17 +211,49 @@ def _validate_study_artifact(kind: str, result: Any, hits: list[dict[str, Any]])
                 raise ValueError("Flashcard citation page is not in the supplied passages")
     elif kind == "mindmap":
         nodes, edges = result.get("nodes"), result.get("edges")
-        if not isinstance(nodes, list) or not nodes or not isinstance(edges, list):
+        if not isinstance(nodes, list) or len(nodes) < 5 or not isinstance(edges, list):
+            raise ValueError("Mind map is incomplete: it needs a root and at least four supported concepts")
+        if len(nodes) > 9:
+            raise ValueError("Mind map has too many nodes; keep it to one root and up to eight concepts")
+        if len(edges) < len(nodes) - 1:
+            raise ValueError("Mind map concepts are missing relationship links")
+        if not isinstance(edges, list):
             raise ValueError("Mind map needs nodes and edges")
         ids = {node.get("id") for node in nodes if isinstance(node, dict) and isinstance(node.get("id"), str)}
         if len(ids) != len(nodes) or any(not isinstance(node.get("label"), str) or not node["label"].strip() for node in nodes):
             raise ValueError("Mind map nodes need unique ids and labels")
         if not any(node.get("id") == "root" for node in nodes):
             raise ValueError("Mind map needs a root node")
-        if any(not isinstance(edge, dict) or edge.get("source") not in ids or edge.get("target") not in ids or edge.get("source") == edge.get("target") for edge in edges):
+        normalized_labels = [re.sub(r"\s+", " ", node["label"]).strip().casefold() for node in nodes]
+        if len(normalized_labels) != len(set(normalized_labels)):
+            raise ValueError("Mind map contains duplicate concepts")
+        page_text: dict[int, str] = {}
+        for hit in hits:
+            page = int(hit["page_number"])
+            page_text[page] = f"{page_text.get(page, '')} {hit['content']}"
+        for node in nodes:
+            if type(node.get("page")) is not int or node["page"] not in allowed_pages:
+                raise ValueError("Each mind map concept needs a valid source page")
+            evidence = node.get("evidence")
+            if not isinstance(evidence, str) or not 20 <= len(evidence.strip()) <= 180:
+                raise ValueError("Each mind map concept needs a short evidence quote")
+            normalize = lambda value: re.sub(r"\s+", " ", value).strip().casefold()
+            if normalize(evidence) not in normalize(page_text[node["page"]]):
+                raise ValueError(f"Mind map evidence quote does not match page {node['page']}")
+        if any(not isinstance(edge, dict) or edge.get("source") not in ids or edge.get("target") not in ids or edge.get("source") == edge.get("target") or not isinstance(edge.get("label"), str) or not edge["label"].strip() for edge in edges):
             raise ValueError("Mind map edge points to an unknown node")
-        if len(nodes) > 1 and not edges:
-            raise ValueError("Mind map concepts need relationship edges")
+        children: dict[str, list[str]] = {node_id: [] for node_id in ids}
+        for edge in edges:
+            children[edge["source"]].append(edge["target"])
+        reached = {"root"}
+        pending = ["root"]
+        while pending:
+            for child in children[pending.pop()]:
+                if child not in reached:
+                    reached.add(child)
+                    pending.append(child)
+        if reached != ids:
+            raise ValueError("Every mind map concept must connect back to the root")
 
 
 def _generation_failure_reason(exc: Exception, api_key: str, base_url: str, model: str) -> str:
@@ -243,12 +277,12 @@ def _generation_failure_reason(exc: Exception, api_key: str, base_url: str, mode
         detail = str(detail).replace(api_key, "[hidden]").strip()
         if not detail:
             detail = "The provider did not give details."
-        return f"Gemini API HTTP {exc.code}: {detail[:260]}"
+        return f"{provider} HTTP {exc.code}: {detail[:260]}"
     if isinstance(exc, urllib.error.URLError):
         if local_ollama:
             return "Could not reach Ollama at localhost:11434. Make sure the Ollama app is running, then try again."
         return f"Could not reach {provider}. Check internet access and try again."
     if isinstance(exc, (json.JSONDecodeError, KeyError, IndexError, TypeError)):
-        return "Gemini returned an unexpected response format. Try again; if it repeats, check the backend log."
+        return f"{provider} returned an unexpected response format. Try again; if it repeats, check the backend log."
     reason = str(exc).replace(api_key, "[hidden]").strip()
     return f"{provider} response did not pass validation: {reason[:220] or type(exc).__name__}."
