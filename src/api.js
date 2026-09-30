@@ -31,7 +31,15 @@ export async function apiFetch(path, options = {}) {
   if (token) headers.set("Authorization", `Bearer ${token}`);
   const response = await fetch(`${API_BASE}${path}`, { ...options, headers });
   if (response.status === 204) return null;
-  const result = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(result.detail || `Request failed (${response.status})`);
+  const contentType = response.headers.get("content-type") || "";
+  const result = contentType.includes("application/json")
+    ? await response.json().catch(() => ({}))
+    : await response.text().catch(() => "");
+  if (!response.ok) {
+    const detail = typeof result === "string" ? result.trim() : result.detail || result.message;
+    const error = new Error(detail || `Request failed (${response.status})`);
+    error.status = response.status;
+    throw error;
+  }
   return result;
 }

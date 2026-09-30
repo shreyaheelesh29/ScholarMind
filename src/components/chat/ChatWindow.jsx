@@ -138,9 +138,14 @@ export default function ChatWindow() {
       setMessages((m) => [...m, aiMsg]);
       refreshChats();
     } catch (error) {
+      const message = error.status
+        ? error.status >= 500
+          ? `The ScholarMind backend returned an internal error (HTTP ${error.status}). Check the backend terminal for its traceback.`
+          : `The chat request failed (HTTP ${error.status}): ${error.message}`
+        : `Could not connect to the ScholarMind backend: ${error.message}`;
       setMessages((m) => [...m, {
         id: `e-${Date.now()}`, role: "assistant",
-        content: `I couldn't reach the ScholarMind backend: ${error.message}`,
+        content: message,
         time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
       }]);
     } finally {
