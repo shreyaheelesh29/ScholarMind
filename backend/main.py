@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import uuid
 from pathlib import Path
@@ -98,6 +99,53 @@ def owned_paper(paper_id: str, user: dict[str, Any]) -> dict[str, Any]:
     return paper
 
 
+def pdf_index(file_path: str) -> dict[str, Any]:
+    """Return real PDF bookmarks and a page index with headings detected from page text."""
+    with pymupdf.open(file_path) as document:
+        page_count = len(document)
+        detected: list[list[str]] = [[] for _ in range(page_count)]
+        heading_pattern = re.compile(r"^\d+(?:\.\d+)*\.?\s+[A-Z][\w ,:;()&/'’–-]{1,100}$")
+        named_pattern = re.compile(
+            r"^(abstract|introduction|background|related work|method(?:s|ology)?|"
+            r"experiments?|results?(?: and discussion)?|discussion|conclusion|"
+            r"references|acknowledg(?:e)?ments|appendix(?:\s+[A-Z])?)$", re.IGNORECASE
+        )
+
+        for page_number, page in enumerate(document, start=1):
+            page_index = page_number - 1
+            for block in page.get_text("dict").get("blocks", []):
+                for line in block.get("lines", []):
+                    spans = line.get("spans", [])
+                    title = re.sub(r"\s+", " ", "".join(span.get("text", "") for span in spans)).strip()
+                    if not title or len(title) > 110:
+                        continue
+                    bold = any(span.get("flags", 0) & 16 for span in spans)
+                    size = max((span.get("size", 0) for span in spans), default=0)
+                    is_heading = bool(heading_pattern.match(title) or named_pattern.match(title))
+                    is_styled_heading = bold and size >= 12 and len(title.split()) <= 12 and not title.endswith((".", ";", ","))
+                    if (is_heading or is_styled_heading) and title not in detected[page_index]:
+                        detected[page_index].append(title)
+
+        toc = document.get_toc()
+        contents = [
+            {"title": title.strip(), "page": page_number, "level": max(level - 1, 0)}
+            for level, title, page_number, *_ in toc
+            if title.strip() and 1 <= page_number <= page_count
+        ]
+        if not contents:
+            contents = [
+                {"title": title, "page": page_number, "level": 0}
+                for page_number, titles in enumerate(detected, start=1)
+                for title in titles
+            ]
+
+        pages = [
+            {"page": page_number, "title": titles[0] if titles else f"Page {page_number}"}
+            for page_number, titles in enumerate(detected, start=1)
+        ]
+        return {"contents": contents, "pages": pages}
+
+
 @app.get("/api/health")
 def health_check():
     return {"status": "ok", "message": "ScholarMind backend is running"}
@@ -183,6 +231,17 @@ def papers(user: dict[str, Any] = Depends(current_user)):
 def paper(paper_id: str, user: dict[str, Any] = Depends(current_user)):
     result = owned_paper(paper_id, user)
     return {key: value for key, value in result.items() if key != "stored_path"}
+
+
+@app.get("/api/papers/{paper_id}/index")
+def paper_index(paper_id: str, user: dict[str, Any] = Depends(current_user)):
+    result = owned_paper(paper_id, user)
+    if not Path(result["stored_path"]).is_file():
+        raise HTTPException(status_code=404, detail="Paper file not found")
+    try:
+        return pdf_index(result["stored_path"])
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Could not read PDF contents: {exc}") from exc
 
 
 @app.get("/api/papers/{paper_id}/file")

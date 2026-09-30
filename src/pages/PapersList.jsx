@@ -1,78 +1,35 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import PaperCard from "../components/papers/PaperCard";
 import Button from "../components/ui/Button";
 import { Link } from "react-router-dom";
-
-const papers = [
-  {
-    id: 1,
-    title: "Attention Is All You Need: A Comprehensive Survey of Transformer Architectures",
-    authors: ["Ashish Vaswani", "Noam Shazeer", "Niki Parmar"],
-    year: 2024,
-    pages: 42,
-    field: "Machine Learning",
-    tags: ["Transformers", "NLP", "Attention"],
-    status: "processed",
-  },
-  {
-    id: 2,
-    title: "Deep Learning for Medical Image Analysis: Recent Advances and Future Directions",
-    authors: ["Sarah Chen", "Michael Zhang"],
-    year: 2024,
-    pages: 28,
-    field: "Computer Vision",
-    tags: ["Medical Imaging", "CNN", "Deep Learning"],
-    status: "processed",
-  },
-  {
-    id: 3,
-    title: "Large Language Models in Scientific Research: Opportunities and Challenges",
-    authors: ["Emily Johnson", "David Williams", "Lisa Park", "Raj Patel"],
-    year: 2025,
-    pages: 35,
-    field: "Natural Language Processing",
-    tags: ["LLM", "Research", "AI Ethics"],
-    status: "processed",
-  },
-  {
-    id: 4,
-    title: "Reinforcement Learning for Autonomous Systems in Dynamic Environments",
-    authors: ["James Wilson", "Maria Garcia"],
-    year: 2024,
-    pages: 51,
-    field: "Robotics",
-    tags: ["RL", "Autonomy", "Control"],
-    status: "processing",
-  },
-  {
-    id: 5,
-    title: "Graph Neural Networks: A Comprehensive Review on Methodologies and Applications",
-    authors: ["Alex Kim", "Sophie Brown"],
-    year: 2023,
-    pages: 64,
-    field: "Machine Learning",
-    tags: ["GNN", "Graphs", "Survey"],
-    status: "processed",
-  },
-  {
-    id: 6,
-    title: "Federated Learning: Privacy-Preserving Machine Learning at Scale",
-    authors: ["Tom Anderson", "Julia Lee"],
-    year: 2024,
-    pages: 22,
-    field: "Machine Learning",
-    tags: ["Federated", "Privacy", "Distributed"],
-    status: "pending",
-  },
-];
+import { apiFetch } from "../api";
 
 export default function PapersList() {
+  const [papers, setPapers] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedField, setSelectedField] = useState("All");
   const [sortBy, setSortBy] = useState("recent");
   const [viewMode, setViewMode] = useState("grid");
 
-  const fields = ["All", "Machine Learning", "Computer Vision", "Natural Language Processing", "Robotics"];
+  useEffect(() => {
+    apiFetch("/papers")
+      .then(({ papers: uploaded }) => setPapers(uploaded.map((paper) => ({
+        id: paper.id,
+        title: paper.filename,
+        authors: [],
+        year: paper.created_at ? new Date(paper.created_at).getFullYear() : "",
+        pages: paper.page_count,
+        field: "Uploaded paper",
+        tags: [],
+        status: "processed",
+      }))))
+      .catch((error) => setLoadError(error.message))
+      .finally(() => setLoading(false));
+  }, []);
+
+  const fields = ["All", "Uploaded paper"];
 
   const filtered = papers.filter((p) => {
     const matchesSearch =
@@ -88,7 +45,7 @@ export default function PapersList() {
       <div className="flex items-start justify-between">
         <div>
           <h1 className="text-2xl font-bold text-slate-900">My Papers</h1>
-          <p className="mt-1 text-slate-500">{filtered.length} paper(s) in your library</p>
+      <p className="mt-1 text-slate-500">{filtered.length} paper(s) in your library</p>
         </div>
         <Link to="/upload">
           <Button
@@ -166,7 +123,7 @@ export default function PapersList() {
         </div>
       </div>
 
-      {filtered.length === 0 ? (
+      {loading ? <p className="rounded-xl border border-slate-200 bg-white p-6 text-sm text-slate-500" role="status">Loading your papers…</p> : loadError ? <p className="rounded-xl bg-red-50 p-5 text-sm text-red-700">{loadError}</p> : filtered.length === 0 ? (
         <div className="rounded-2xl border border-dashed border-slate-300 bg-white p-16 text-center">
           <div className="w-16 h-16 mx-auto rounded-2xl bg-slate-100 flex items-center justify-center mb-4">
             <svg className="w-8 h-8 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -209,7 +166,7 @@ export default function PapersList() {
                     ))}
                   </div>
                 </div>
-                <Link to="/viewer" className="px-3 py-2 rounded-lg bg-primary-50 text-primary-700 text-sm font-semibold hover:bg-primary-100 transition">Open</Link>
+                <Link to={`/viewer?paperId=${encodeURIComponent(paper.id)}`} className="px-3 py-2 rounded-lg bg-primary-50 text-primary-700 text-sm font-semibold hover:bg-primary-100 transition">Open</Link>
               </div>
             )
           )}

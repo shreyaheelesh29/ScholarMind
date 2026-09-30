@@ -6,7 +6,6 @@ import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "../co
 
 export default function UploadPaper() {
   const [uploadedFiles, setUploadedFiles] = useState([]);
-  const [uploading, setUploading] = useState(false);
 
   const handleFilesSelected = (files) => {
     const newFiles = files.map((f) => ({
@@ -23,9 +22,8 @@ export default function UploadPaper() {
   };
 
   const uploadToBackend = async (upload) => {
-    setUploading(true);
     setUploadedFiles((prev) => prev.map((f) =>
-      f.id === upload.id ? { ...f, progress: 25, status: "uploading" } : f
+      f.id === upload.id ? { ...f, progress: 0, status: "processing", error: "" } : f
     ));
     try {
       const body = new FormData();
@@ -39,7 +37,6 @@ export default function UploadPaper() {
         f.id === upload.id ? { ...f, status: "failed", error: error.message } : f
       ));
     } finally {
-      setUploading(false);
     }
   };
 
@@ -56,7 +53,7 @@ export default function UploadPaper() {
   const statusInfo = {
     queued: { color: "bg-slate-100 text-slate-600", label: "Queued" },
     uploading: { color: "bg-primary-100 text-primary-700", label: "Uploading" },
-    processing: { color: "bg-warning-100 text-warning-700", label: "Processing" },
+    processing: { color: "bg-warning-100 text-warning-700", label: "Uploading & indexing…" },
     processed: { color: "bg-success-100 text-success-700", label: "Ready" },
     failed: { color: "bg-red-100 text-red-700", label: "Failed" },
   };
@@ -119,19 +116,14 @@ export default function UploadPaper() {
                       {statusInfo[f.status].label}
                     </span>
                   </div>
-                  <p className="text-xs text-slate-500 mt-0.5">
-                    {formatSize(f.size)} · {Math.round(f.progress)}%
-                  </p>
+                  <p className="text-xs text-slate-500 mt-0.5">{formatSize(f.size)}{f.status === "processing" ? " · Uploading, extracting text, and indexing" : ""}</p>
+                  {f.error && <div className="mt-2 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700" role="alert">
+                    <p>{f.error}</p>
+                    <button type="button" onClick={() => uploadToBackend(f)} className="mt-2 font-semibold underline">Retry upload</button>
+                  </div>}
                   {(f.status === "uploading" || f.status === "processing") && (
                     <div className="mt-2 h-1.5 bg-slate-100 rounded-full overflow-hidden">
-                      <div
-                        className={`h-full rounded-full transition-all duration-300 ${
-                          f.status === "processing"
-                            ? "bg-warning-500 animate-pulse-soft"
-                            : "bg-primary-500"
-                        }`}
-                        style={{ width: `${f.progress}%` }}
-                      />
+                      <div className="h-full w-full rounded-full bg-primary-500 animate-pulse-soft" />
                     </div>
                   )}
                 </div>
