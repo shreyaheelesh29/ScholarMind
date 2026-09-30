@@ -422,6 +422,7 @@ export default function ChatWindow() {
                 </svg>
               </div>
               <div className="bg-white border border-slate-200 rounded-2xl rounded-tl-md px-5 py-4 shadow-sm">
+                <p className="mb-2 text-xs text-slate-500">Searching your papers and preparing a cited answer…</p>
                 <div className="flex gap-1">
                   <span
                     className="w-2 h-2 bg-primary-400 rounded-full animate-bounce"
