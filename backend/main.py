@@ -370,18 +370,20 @@ def chat(request: ChatRequest, user: dict[str, Any] = Depends(current_user)):
         for paper_id in request.paper_ids:
             owned_paper(paper_id, user)
     hits = hybrid_search(request.question, embed([request.question])[0], request.paper_ids, request.top_k, owner_id=user["id"])
-    if not hits:
-        raise HTTPException(status_code=404, detail="No indexed paper content was found. Upload a text-based PDF first.")
     citations = citations_for(hits)
     session = None
+    history: list[dict[str, str]] = []
     if request.session_id:
         session = get_user_chat(user["id"], request.session_id)
         if not session:
             raise HTTPException(status_code=404, detail="Chat not found")
+        history = [{"role": message["role"], "content": message["content"]}
+                   for message in session["messages"][-8:]
+                   if message["role"] in {"user", "assistant"}]
     else:
         session = create_chat_session(user["id"], request.question.strip()[:120], request.paper_ids[0] if request.paper_ids else None)
     save_chat_message(session["id"], "user", request.question)
-    response = {"answer": answer(request.question, hits), "citations": citations,
+    response = {"answer": answer(request.question, hits, history), "citations": citations,
                 "sources": [{"type": "page", "label": f"{item['paperTitle']} p.{item['page']}", "page": item["page"]} for item in citations],
                 "mode": "llm" if os.getenv("LLM_API_KEY") else "retrieval-only"}
     save_chat_message(session["id"], "assistant", response["answer"], citations, response["sources"])
