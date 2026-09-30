@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { Link } from "react-router-dom";
 import { apiFetch } from "../../api";
 
@@ -8,17 +8,57 @@ const labels = {
   visualization: "Visualization outline",
 };
 
+function QuizQuestion({ value }) {
+  const [selected, setSelected] = useState(null);
+  const questionId = useId();
+  const answered = selected !== null;
+  const correct = Number(value.answer);
+
+  return <article className="space-y-3 rounded-xl border border-indigo-100 bg-white p-4">
+    <div className="flex items-start justify-between gap-3"><h4 className="font-semibold leading-relaxed text-slate-900">{value.question}</h4>{value.page && <span className="shrink-0 rounded-full bg-indigo-50 px-2 py-1 text-xs text-indigo-700">p. {value.page}</span>}</div>
+    <fieldset disabled={answered}>
+      <legend className="sr-only">Choose an answer</legend>
+      <ol className="space-y-2">{value.options.map((option, index) => {
+        const isSelected = selected === index;
+        const isCorrect = correct === index;
+        const optionStyle = !answered
+          ? "border-slate-100 bg-slate-50 text-slate-700 hover:border-indigo-300 hover:bg-indigo-50"
+          : isCorrect
+            ? "border-emerald-200 bg-emerald-50 text-emerald-900"
+            : isSelected
+              ? "border-red-200 bg-red-50 text-red-900"
+              : "border-slate-100 bg-slate-50 text-slate-500";
+        return <li key={index}>
+          <label htmlFor={`${questionId}-${index}`} className={`flex cursor-pointer items-start gap-3 rounded-lg border px-3 py-2.5 text-sm transition ${answered ? "cursor-default" : ""} ${optionStyle}`}>
+            <input
+              id={`${questionId}-${index}`}
+              type="radio"
+              name={questionId}
+              value={index}
+              checked={isSelected}
+              onChange={() => setSelected(index)}
+              className="mt-0.5 accent-indigo-600"
+            />
+            <span><span className="mr-2 font-semibold">{String.fromCharCode(65 + index)}.</span>{option}
+              {answered && isCorrect && <span className="ml-2 text-xs font-semibold text-emerald-800">Correct answer</span>}
+              {answered && isSelected && !isCorrect && <span className="ml-2 text-xs font-semibold text-red-800">Your answer</span>}
+            </span>
+          </label>
+        </li>;
+      })}</ol>
+    </fieldset>
+    {answered && <div role="status" aria-live="polite" className={`rounded-lg p-3 ${selected === correct ? "bg-emerald-50 text-emerald-900" : "bg-red-50 text-red-900"}`}>
+      <p className="font-semibold">{selected === correct ? "Correct!" : "Not quite. The highlighted option is correct."}</p>
+    </div>}
+    {answered && value.explanation && <div className="rounded-lg bg-blue-50 p-3"><p className="text-xs font-semibold uppercase tracking-wide text-blue-700">Explanation</p><p className="mt-1 whitespace-pre-wrap text-sm leading-relaxed text-slate-700">{value.explanation}</p></div>}
+  </article>;
+}
+
 function OutputValue({ value }) {
   if (value == null || typeof value === "boolean") return null;
   if (typeof value === "string" || typeof value === "number") return <p className="whitespace-pre-wrap text-sm leading-relaxed text-slate-700">{String(value)}</p>;
   if (Array.isArray(value)) return <div className="space-y-3">{value.map((item, index) => <div key={index} className="rounded-lg border border-slate-100 bg-slate-50 p-3"><OutputValue value={item} /></div>)}</div>;
-  if (typeof value.question === "string" && Array.isArray(value.options)) {
-    return <article className="space-y-3 rounded-xl border border-indigo-100 bg-white p-4">
-      <div className="flex items-start justify-between gap-3"><h4 className="font-semibold leading-relaxed text-slate-900">{value.question}</h4>{value.page && <span className="shrink-0 rounded-full bg-indigo-50 px-2 py-1 text-xs text-indigo-700">p. {value.page}</span>}</div>
-      <ol className="space-y-2">{value.options.map((option, index) => <li key={index} className={`rounded-lg border px-3 py-2 text-sm ${Number(value.answer) === index ? "border-emerald-200 bg-emerald-50 text-emerald-900" : "border-slate-100 bg-slate-50 text-slate-700"}`}><span className="mr-2 font-semibold">{String.fromCharCode(65 + index)}.</span>{option}{Number(value.answer) === index && <span className="ml-2 text-xs font-semibold">Correct answer</span>}</li>)}</ol>
-      {value.explanation && <div className="rounded-lg bg-blue-50 p-3"><p className="text-xs font-semibold uppercase tracking-wide text-blue-700">Explanation</p><p className="mt-1 whitespace-pre-wrap text-sm leading-relaxed text-slate-700">{value.explanation}</p></div>}
-    </article>;
-  }
+  if (typeof value.question === "string" && Array.isArray(value.options)) return <QuizQuestion value={value} />;
   const entries = Object.entries(value).filter(([key, item]) => item != null && !["citations", "speaker_notes", "_generation_mode", "_generation_notice"].includes(key));
   return <div className="space-y-2">{entries.map(([key, item]) => <div key={key}><p className="mb-0.5 text-xs font-bold uppercase tracking-wide text-slate-500">{key.replaceAll("_", " ")}</p><OutputValue value={item} /></div>)}{value.speaker_notes && <div className="border-l-2 border-primary-300 pl-3"><p className="text-xs font-bold uppercase tracking-wide text-primary-700">Presenter notes</p><p className="mt-1 text-sm text-slate-700">{value.speaker_notes}</p></div>}</div>;
 }
