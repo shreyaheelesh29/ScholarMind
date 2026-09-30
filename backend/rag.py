@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 _embedding_model_instance: Any | None = None
 _embedding_model_lock = threading.Lock()
+_local_ollama_request_lock = threading.Lock()
 
 def embedding_model() -> Any:
     """Load the shared embedding model once, avoiding concurrent cold-load races."""
@@ -107,8 +108,15 @@ def _chat_request(base_url: str, model: str, messages: list[dict[str, str]], tim
         endpoint = f"{base_url.rstrip('/')}/chat/completions"
     request = urllib.request.Request(endpoint, data=json.dumps(body).encode("utf-8"),
         headers={"Authorization": f"Bearer {os.getenv('LLM_API_KEY', '')}", "Content-Type": "application/json"}, method="POST")
-    with _open_with_retries(request, timeout=timeout, attempts=attempts) as response:
-        result = json.loads(response.read())
+    if _is_local_ollama(base_url):
+        # A small local model can become much slower when chat and study generation
+        # decode at the same time, especially on CPU-only student machines.
+        with _local_ollama_request_lock:
+            with _open_with_retries(request, timeout=timeout, attempts=attempts) as response:
+                result = json.loads(response.read())
+    else:
+        with _open_with_retries(request, timeout=timeout, attempts=attempts) as response:
+            result = json.loads(response.read())
     content = result.get("message", {}).get("content") if _is_local_ollama(base_url) else result.get("choices", [{}])[0].get("message", {}).get("content")
     if not isinstance(content, str) or not content.strip():
         raise ValueError("The model returned an empty response")
@@ -225,13 +233,17 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
             if kind in {"quiz", "flashcards", "mindmap"} else "AI generation is not configured. This is extracted source material, not a generated " + kind.replace("_", " ") + ".")
         return fallback_data
     base_url = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+    local_ollama = _is_local_ollama(base_url)
+    compact_study_kind = kind in {"flashcards", "mindmap", "quiz"}
+    generation_count = min(count, 5) if local_ollama and compact_study_kind else min(count, 10)
+    source_hits = hits[:5] if local_ollama and compact_study_kind else hits
     if kind == "mindmap":
         shared = (f"Use only the supplied paper passages. Focus requested: {prompt}. "
                   "Return one root plus four to six distinct concepts, with meaningful labeled links. "
                   "Choose concise labels using the paper's own terminology. Return JSON only, with no markdown. "
                   "Return only nodes with id and label, plus edges with source, target, and label; ScholarMind will attach page citations and exact evidence from the PDF.")
     else:
-        shared = (f"Use only the paper passages below. Focus requested: {prompt}. Generate up to {min(count, 10)} useful items. "
+        shared = (f"Use only the paper passages below. Focus requested: {prompt}. Generate up to {generation_count} useful items. "
                   "Each page must be one of the page numbers shown in the sources. If evidence is insufficient, omit the item. "
                   "Do not copy a passage verbatim as a question; paraphrase and test understanding. Return JSON only, with no markdown.")
     task_instructions = {
@@ -251,17 +263,20 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
         "report": 1500, "ppt_outline": 1500, "literature_review": 1700,
         "comparison": 1600, "research_gap": 1500, "research_ideas": 1700,
     }
-    context_chars = 1300 if kind in {"flashcards", "mindmap", "quiz", "visualization", "viva"} else 1800
+    if local_ollama:
+        # Smaller JSON responses materially reduce decode time for local Qwen-sized models.
+        generation_tokens.update({"flashcards": 650, "mindmap": 450, "quiz": 900})
+    context_chars = (850 if local_ollama else 1300) if kind in {"flashcards", "mindmap", "quiz", "visualization", "viva"} else 1800
     messages = [
             {"role": "system", "content": "You are a precise academic learning assistant. Use only supplied source passages and return valid JSON."},
-            {"role": "user", "content": f"{instruction}\n\nSOURCES:\n{_context(hits, max_chars=context_chars)}"}
+            {"role": "user", "content": f"{instruction}\n\nSOURCES:\n{_context(source_hits, max_chars=context_chars)}"}
         ]
     try:
         content = _chat_request(base_url, model, messages,
-            timeout=120 if _is_local_ollama(base_url) else 45,
+            timeout=120 if local_ollama else 45,
             max_tokens=generation_tokens.get(kind, 1600),
             json_mode=kind != "mindmap",
-            json_schema=_mindmap_schema() if kind == "mindmap" and _is_local_ollama(base_url) else None,
+            json_schema=_mindmap_schema() if kind == "mindmap" and local_ollama else None,
             attempts=1)
         if not isinstance(content, str) or not content.strip():
             logger.warning("LLM study generation returned empty content; using retrieved paper content instead")
@@ -277,8 +292,8 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
             return fallback_data
         result = json.loads(content[start:end + 1])
         if kind == "mindmap":
-            _attach_mindmap_evidence(result, hits)
-        _validate_study_artifact(kind, result, hits)
+            _attach_mindmap_evidence(result, source_hits)
+        _validate_study_artifact(kind, result, source_hits)
         result["_generation_mode"] = "ai"
         return result
     except Exception as exc:
