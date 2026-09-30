@@ -470,7 +470,20 @@ def _validate_study_artifact(kind: str, result: Any, hits: list[dict[str, Any]])
         if not isinstance(items, list) or (not items and kind != "research_gap"):
             raise ValueError(f"The generated {kind.replace('_', ' ')} has no usable results")
 
-        valid_sources = {(str(hit["filename"]), int(hit["page_number"])) for hit in hits}
+        def normalize_filename(value: str) -> str:
+            # Models may vary filename casing, separators, or include a path.
+            # Normalize presentation only; do not fuzzy-match different papers.
+            basename = value.replace("\\", "/").rsplit("/", 1)[-1].strip().casefold()
+            basename = re.sub(r"\s+", " ", basename)
+            if basename.endswith(".pdf"):
+                basename = basename[:-4]
+            return re.sub(r"[\s_-]+", "", basename)
+
+        valid_sources: dict[str, dict[int, set[str]]] = {}
+        for hit in hits:
+            filename = str(hit["filename"])
+            page_sources = valid_sources.setdefault(normalize_filename(filename), {})
+            page_sources.setdefault(int(hit["page_number"]), set()).add(filename)
 
         def check_sources(references: Any) -> set[str]:
             if not isinstance(references, list) or not references:
@@ -481,9 +494,20 @@ def _validate_study_artifact(kind: str, result: Any, hits: list[dict[str, Any]])
                     raise ValueError("Analysis source references must include a paper filename and page")
                 paper_name = reference.get("paper")
                 page = reference.get("page")
-                if not isinstance(paper_name, str) or type(page) is not int or (paper_name, page) not in valid_sources:
-                    raise ValueError("An analysis source citation does not match the selected paper passages")
-                referenced_papers.add(paper_name)
+                if isinstance(page, str) and page.strip().isdecimal():
+                    page = int(page.strip())
+                if not isinstance(paper_name, str) or type(page) is not int:
+                    raise ValueError("Each analysis citation needs a source filename and a numeric page")
+                pages = valid_sources.get(normalize_filename(paper_name))
+                canonical_names = pages.get(page, set()) if pages else set()
+                if len(canonical_names) != 1:
+                    raise ValueError("An analysis citation must match a selected paper and one of its supplied passage pages")
+                canonical_name = next(iter(canonical_names))
+                # Store the canonical filename and numeric page so downstream UI
+                # and export code always receive stable citations.
+                reference["paper"] = canonical_name
+                reference["page"] = page
+                referenced_papers.add(canonical_name)
             return referenced_papers
 
         if kind == "comparison":
@@ -497,7 +521,7 @@ def _validate_study_artifact(kind: str, result: Any, hits: list[dict[str, Any]])
                 for finding in findings:
                     if not isinstance(finding, dict) or not isinstance(finding.get("finding"), str):
                         raise ValueError("Each paper comparison needs a supported finding")
-                    cited_papers.update(check_sources([{"paper": finding.get("paper"), "page": finding.get("page")}]))
+                    cited_papers.update(check_sources([finding]))
             if len(cited_papers) < 2:
                 raise ValueError("Comparison evidence must cover at least two selected papers")
         else:
