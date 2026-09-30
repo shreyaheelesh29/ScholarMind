@@ -1,4 +1,6 @@
+import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
+import { apiFetch } from "../api";
 
 const stats = [
   {
@@ -24,6 +26,15 @@ const stats = [
 ];
 
 export default function Dashboard() {
+  const [papers, setPapers] = useState([]);
+  const [papersError, setPapersError] = useState("");
+
+  useEffect(() => {
+    apiFetch("/papers")
+      .then(({ papers: uploaded }) => setPapers(uploaded.slice(0, 4)))
+      .catch((error) => setPapersError(error.message));
+  }, []);
+
   return (
     <div className="space-y-8">
       {/* Header */}
@@ -105,6 +116,14 @@ export default function Dashboard() {
           </div>
         </div>
       </div>
+
+      <section className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div><h2 className="text-lg font-semibold text-slate-900">Your PDFs</h2><p className="mt-1 text-sm text-slate-500">Open an uploaded paper at any of its actual PDF pages.</p></div>
+          <Link to="/papers" className="text-sm font-semibold text-indigo-600 hover:underline">View all papers</Link>
+        </div>
+        {papersError ? <p className="mt-4 rounded-lg bg-red-50 p-3 text-sm text-red-700">{papersError}</p> : papers.length ? <ul className="mt-4 divide-y divide-slate-100">{papers.map((paper) => <li key={paper.id} className="flex flex-wrap items-center justify-between gap-3 py-3"><div className="min-w-0"><p className="truncate font-medium text-slate-800">{paper.filename}</p><p className="text-sm text-slate-500">{paper.page_count} pages</p></div><Link to={`/viewer?paperId=${encodeURIComponent(paper.id)}`} className="rounded-lg bg-indigo-50 px-3 py-2 text-sm font-semibold text-indigo-700 hover:bg-indigo-100">Open PDF</Link></li>)}</ul> : <p className="mt-4 text-sm text-slate-500">No uploaded papers yet. Upload a PDF to see it here.</p>}
+      </section>
     </div>
   );
 }

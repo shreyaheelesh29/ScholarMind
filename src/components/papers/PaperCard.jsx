@@ -1,6 +1,7 @@
 import { Link } from "react-router-dom";
 
 export default function PaperCard({ paper }) {
+  const viewerLink = `/viewer?paperId=${encodeURIComponent(paper.id)}`;
   const statusColors = {
     processed: "bg-success-100 text-success-700",
     processing: "bg-warning-100 text-warning-700",
@@ -17,7 +18,7 @@ export default function PaperCard({ paper }) {
 
   return (
     <div className="group rounded-2xl border border-slate-200 bg-white hover:shadow-lg hover:border-primary-200 transition-all overflow-hidden">
-      <Link to="/viewer" className="block">
+      <Link to={viewerLink} className="block">
         <div className="relative h-40 bg-gradient-to-br from-slate-100 to-slate-50 flex items-center justify-center p-6 group-hover:from-primary-50 group-hover:to-accent-50/50 transition">
           <div className="w-16 h-20 rounded-md bg-white shadow-md border border-slate-200 flex flex-col items-center justify-center">
             <svg className="w-8 h-8 text-primary-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -34,7 +35,7 @@ export default function PaperCard({ paper }) {
       </Link>
 
       <div className="p-5">
-        <Link to="/viewer" className="block">
+        <Link to={viewerLink} className="block">
           <h3 className="font-semibold text-slate-900 line-clamp-2 group-hover:text-primary-600 transition">
             {paper.title}
           </h3>
