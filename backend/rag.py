@@ -65,6 +65,14 @@ def _context(hits: list[dict[str, Any]], max_chars: int = 3000) -> str:
                        for i, h in enumerate(hits, start=1))
 
 
+def _analysis_context(hits: list[dict[str, Any]], max_chars: int = 1800) -> str:
+    """Give analysis models short passage IDs; the backend resolves citations."""
+    return "\n\n".join(
+        f"[S{i}] {hit['filename']} | page {hit['page_number']} | {hit['section']}\n{hit['content'][:max_chars]}"
+        for i, hit in enumerate(hits, start=1)
+    )
+
+
 def _open_with_retries(request: urllib.request.Request, timeout: int, attempts: int = 3):
     """Retry transient provider errors with bounded exponential backoff."""
     for attempt in range(max(1, attempts)):
@@ -224,11 +232,11 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
             "report": '{"sections":[{"title":"...","content":"...","page":1}]}',
             "ppt_outline": '{"slides":[{"title":"...","content":"...","page":1,"speaker_notes":"..."}]}',
             "viva": '{"questions":[{"question":"...","answer":"...","page":1}]}',
-            "literature_review": '{"sections":[{"title":"Theme...","content":"Synthesis across the selected papers...","sources":[{"paper":"filename.pdf","page":1}]}]}',
+            "literature_review": '{"sections":[{"title":"Theme...","content":"Synthesis across the selected papers...","sources":[{"source_id":"S1"}]}]}',
             "visualization": '{"visualizations":[{"title":"...","content":"...","page":1}]}',
-            "comparison": '{"comparisons":[{"criterion":"Methodology","paper_findings":[{"paper":"filename.pdf","finding":"...","page":1}],"synthesis":"Similarities and differences supported by the cited findings."}]}',
-            "research_gap": '{"gaps":[{"title":"...","evidence":"What the selected papers state or omit","why_it_matters":"...","proposed_direction":"...","sources":[{"paper":"filename.pdf","page":1}]}]}',
-            "research_ideas": '{"ideas":[{"title":"...","research_question":"...","motivation":"Gap evidenced in selected papers...","methodology":"...","evaluation":"...","risks":"...","sources":[{"paper":"filename.pdf","page":1}]}]}',
+            "comparison": '{"comparisons":[{"criterion":"Methodology","paper_findings":[{"source_id":"S1","finding":"..."}],"synthesis":"Similarities and differences supported by the cited findings."}]}',
+            "research_gap": '{"gaps":[{"title":"...","evidence":"What the selected papers state or omit","why_it_matters":"...","proposed_direction":"...","sources":[{"source_id":"S1"}]}]}',
+            "research_ideas": '{"ideas":[{"title":"...","research_question":"...","motivation":"Gap evidenced in selected papers...","methodology":"...","evaluation":"...","risks":"...","sources":[{"source_id":"S1"}]}]}',
         }[kind]
     else:
         raise ValueError("Unsupported study artifact type")
@@ -253,14 +261,19 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
         shared = (f"Use only the paper passages below. Focus requested: {prompt}. Generate up to {generation_count} useful items. "
                   "Each page must be one of the page numbers shown in the sources. If evidence is insufficient, omit the item. "
                   "Do not copy a passage verbatim as a question; paraphrase and test understanding. Return JSON only, with no markdown.")
+    analysis_kinds = {"comparison", "literature_review", "research_gap", "research_ideas"}
+    if kind in analysis_kinds:
+        shared = (f"Use only the supplied paper passages. Focus requested: {prompt}. "
+                  "Each passage has an ID such as [S1]. Cite evidence using only those IDs; do not write filenames or page numbers. "
+                  "If evidence is insufficient, omit the unsupported claim. Return JSON only, with no markdown.")
     task_instructions = {
         "quiz": "Create multiple-choice questions that test distinct, important concepts from this paper. Every question must be answerable from the cited passage. Provide exactly four different, plausible options; exactly one is correct. `answer` is the zero-based index (0-3) of that correct option. Explain the answer in one short sentence grounded in the paper.",
         "flashcards": "Create study flashcards, one concept per card. `front` must be a direct, self-contained question. `back` must state the correct answer in one concise sentence, adding a key detail only when supported. Avoid vague prompts and duplicated concepts.",
         "mindmap": "Return a complete map, never only a title or root: exactly one root plus at least four distinct, paper-specific concepts and four or more labeled links. Use concise concept labels of 2-8 words, using terminology actually present in the passages. Do not add page or quote fields; those are matched to the source by the application. Every node must connect to the root.",
-        "comparison": "Compare only the selected papers represented in SOURCES. Cover shared and differing objectives, methods, data/evaluation, results, and limitations where the text supports them. Each paper_findings entry must name the exact source filename and page. Do not invent scores or rank papers; state when a criterion is not reported.",
-        "literature_review": "Write a concise thematic synthesis across the selected uploaded papers, not a list of summaries. Each section must cite the exact filenames and page numbers that support it. Describe agreements, disagreements, and trends only when the supplied passages support them. Do not cite papers absent from SOURCES.",
-        "research_gap": "Infer only cautious candidate gaps from explicit limitations, future-work statements, disagreements, or topics absent in the supplied excerpts. Do not claim a gap is novel or absent from all research. Explain the evidence and list exact source filenames and pages. If evidence is insufficient, return an empty gaps array.",
-        "research_ideas": "Propose feasible candidate ideas motivated by the supplied paper evidence and stated gaps. Clearly label them as proposals, not proven novel contributions. Respect requested novelty/difficulty. Include testable research questions, method, evaluation, risks, and exact source filenames/pages. Do not invent datasets or results.",
+        "comparison": "Compare only the selected papers represented in SOURCES. Cover shared and differing objectives, methods, data/evaluation, results, and limitations where the text supports them. Each paper_findings entry must include its exact source_id such as S1. Do not invent scores or rank papers; state when a criterion is not reported.",
+        "literature_review": "Write a concise thematic synthesis across the selected uploaded papers, not a list of summaries. Each section must cite one or more source IDs such as S1 from the supplied passages. Describe agreements, disagreements, and trends only when supported.",
+        "research_gap": "Infer only cautious candidate gaps from explicit limitations, future-work statements, disagreements, or topics absent in the supplied excerpts. Do not claim a gap is novel or absent from all research. Explain the evidence and cite source IDs such as S1. If evidence is insufficient, return an empty gaps array.",
+        "research_ideas": "Propose feasible candidate ideas motivated by the supplied paper evidence and stated gaps. Clearly label them as proposals, not proven novel contributions. Include a testable question, method, evaluation, risks, and source IDs such as S1. Do not invent datasets or results.",
     }
     instruction = f"{shared} {task_instructions.get(kind, 'Create concise, useful study material grounded in the sources.')} Match this structure: {shape}"
     model = os.getenv("LLM_MODEL", "gpt-4o-mini")
@@ -277,7 +290,7 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
     context_chars = (500 if local_ollama else 1300) if kind in {"flashcards", "mindmap", "quiz", "visualization", "viva"} else 1800
     messages = [
             {"role": "system", "content": "You are a precise academic learning assistant. Use only supplied source passages and return valid JSON."},
-            {"role": "user", "content": f"{instruction}\n\nSOURCES:\n{_context(source_hits, max_chars=context_chars)}"}
+            {"role": "user", "content": f"{instruction}\n\nSOURCES:\n{_analysis_context(source_hits) if kind in analysis_kinds else _context(source_hits, max_chars=context_chars)}"}
         ]
     try:
         content = _chat_request(base_url, model, messages,
@@ -488,10 +501,34 @@ def _validate_study_artifact(kind: str, result: Any, hits: list[dict[str, Any]])
         def check_sources(references: Any) -> set[str]:
             if not isinstance(references, list) or not references:
                 raise ValueError("Each analysis claim needs at least one source filename and page")
+            # Some local models emit a bare ID/string list instead of the
+            # requested object list; normalize only unambiguous S1-style IDs.
+            references[:] = [
+                {"source_id": reference} if isinstance(reference, (str, int)) and not isinstance(reference, bool)
+                else reference
+                for reference in references
+            ]
             referenced_papers = set()
             for reference in references:
                 if not isinstance(reference, dict):
-                    raise ValueError("Analysis source references must include a paper filename and page")
+                    raise ValueError("Analysis source references must use a supplied source ID")
+                source_id = reference.get("source_id")
+                if source_id is not None:
+                    if type(source_id) is int:
+                        source_index = source_id
+                    elif isinstance(source_id, str):
+                        match = re.fullmatch(r"\s*\[?\s*(?:source\s*)?s?(\d+)\s*\]?\s*", source_id, re.IGNORECASE)
+                        source_index = int(match.group(1)) if match else 0
+                    else:
+                        source_index = 0
+                    if not 1 <= source_index <= len(hits):
+                        raise ValueError("An analysis source ID does not match the supplied paper passages")
+                    source_hit = hits[source_index - 1]
+                    reference["paper"] = str(source_hit["filename"])
+                    reference["page"] = int(source_hit["page_number"])
+                    reference.pop("source_id", None)
+                    referenced_papers.add(reference["paper"])
+                    continue
                 paper_name = reference.get("paper")
                 page = reference.get("page")
                 if isinstance(page, str) and page.strip().isdecimal():
@@ -533,6 +570,12 @@ def _validate_study_artifact(kind: str, result: Any, hits: list[dict[str, Any]])
             for item in items:
                 if not isinstance(item, dict) or any(not isinstance(item.get(field), str) or len(item[field].strip()) < 8 for field in required_fields):
                     raise ValueError(f"Each {kind.replace('_', ' ')} item needs its required analysis fields")
+                references = item.get("sources") or item.get("source_ids")
+                if references is not None:
+                    if not isinstance(references, list):
+                        references = [references]
+                    item["sources"] = references
+                    item.pop("source_ids", None)
                 check_sources(item.get("sources"))
 
 
