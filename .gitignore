@@ -223,4 +223,5 @@ dist/
 .env
 .env.*
 !.env.example
+deploy.env
 backend/data/papers/

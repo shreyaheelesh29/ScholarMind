@@ -29,7 +29,7 @@ from database import (create_user, find_user_by_email, get_paper, get_user, hybr
 from rag import answer, citations_for, embed, embed_query, generate_study_artifact
 
 BASE_DIR = Path(__file__).resolve().parent
-PAPERS_DIR = BASE_DIR / "data" / "papers"
+PAPERS_DIR = Path(os.getenv("PAPER_STORAGE_DIR", str(BASE_DIR / "data" / "papers"))).resolve()
 MAX_UPLOAD_BYTES = 100 * 1024 * 1024
 AUTH = HTTPBearer(auto_error=False)
 ARTIFACT_TYPES = {"flashcards", "mindmap", "quiz", "summary", "report", "ppt_outline", "viva", "literature_review", "visualization", "comparison", "research_gap", "research_ideas"}
