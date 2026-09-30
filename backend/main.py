@@ -274,7 +274,11 @@ def generate_learning(payload: GenerateRequest, user: dict[str, Any] = Depends(c
         content = generate_study_artifact(payload.kind, query, hits, payload.count)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    artifact = save_artifact(user["id"], payload.kind, query[:200], {**content, "citations": citations_for(hits), "source_paper_ids": paper_ids}, paper_ids[0])
+    if content.get("_generation_mode") == "source_fallback":
+        raise HTTPException(status_code=503, detail=content.get("_generation_notice", "AI generation failed. Please try again."))
+    kind_title = payload.kind.replace("_", " ").title()
+    artifact_title = (f"{kind_title}: {focus}" if focus else f"{kind_title} from {paper_names}")[:200]
+    artifact = save_artifact(user["id"], payload.kind, artifact_title, {**content, "citations": citations_for(hits), "source_paper_ids": paper_ids}, paper_ids[0])
     record_activity(user["id"], f"generated_{payload.kind}", {"artifact_id": artifact["id"], "paper_ids": paper_ids})
     return {"artifact": artifact}
 

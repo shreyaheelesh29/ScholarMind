@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
+import time
 import urllib.error
 import urllib.request
 from functools import lru_cache
@@ -27,8 +29,23 @@ def citations_for(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
             for i, h in enumerate(hits, start=1)]
 
 def _context(hits: list[dict[str, Any]]) -> str:
-    return "\n\n".join(f"[{i}] {h['filename']} | page {h['page_number']} | {h['section']}\n{h['content']}"
+    return "\n\n".join(f"[{i}] {h['filename']} | page {h['page_number']} | {h['section']}\n{h['content'][:3000]}"
                        for i, h in enumerate(hits, start=1))
+
+
+def _open_with_retries(request: urllib.request.Request, timeout: int):
+    """Retry only transient Gemini errors, following exponential backoff guidance."""
+    for attempt in range(3):
+        try:
+            return urllib.request.urlopen(request, timeout=timeout)
+        except urllib.error.HTTPError as exc:
+            if exc.code not in {408, 429, 500, 502, 503, 504} or attempt == 2:
+                raise
+            exc.close()
+        except urllib.error.URLError:
+            if attempt == 2:
+                raise
+        time.sleep((2 ** attempt) + random.uniform(0, 0.35))
 
 def _extractive_answer(hits: list[dict[str, Any]]) -> str:
     if not hits:
@@ -46,6 +63,7 @@ def answer(question: str, hits: list[dict[str, Any]]) -> str:
         return _extractive_answer(hits)
     base_url = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/")
     payload = json.dumps({"model": os.getenv("LLM_MODEL", "gpt-4o-mini"), "temperature": 0.2,
+        "reasoning_effort": "low", "max_tokens": 2048,
         "messages": [
             {"role": "system", "content": "You are a precise academic assistant. Answer only from supplied sources. Cite every factual claim as [n]."},
             {"role": "user", "content": f"SOURCES:\n{_context(hits)}\n\nQUESTION: {question}"}
@@ -53,7 +71,7 @@ def answer(question: str, hits: list[dict[str, Any]]) -> str:
     request = urllib.request.Request(f"{base_url}/chat/completions", data=payload,
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}, method="POST")
     try:
-        with urllib.request.urlopen(request, timeout=45) as response:
+        with _open_with_retries(request, timeout=45) as response:
             content = json.loads(response.read())["choices"][0]["message"]["content"]
         if isinstance(content, str) and content.strip():
             return content.strip()
@@ -100,6 +118,7 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
     }
     instruction = f"{shared} {task_instructions.get(kind, 'Create concise, useful study material grounded in the sources.')} Match this structure: {shape}"
     payload = json.dumps({"model": os.getenv("LLM_MODEL", "gpt-4o-mini"), "temperature": 0.2,
+        "reasoning_effort": "low", "max_tokens": 4096,
         "messages": [
             {"role": "system", "content": "You are a precise academic learning assistant. Use only supplied source passages and return valid JSON."},
             {"role": "user", "content": f"{instruction}\n\nSOURCES:\n{_context(hits)}"}
@@ -107,7 +126,7 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
     request = urllib.request.Request(f"{base_url}/chat/completions", data=payload,
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}, method="POST")
     try:
-        with urllib.request.urlopen(request, timeout=60) as response:
+        with _open_with_retries(request, timeout=90) as response:
             content = json.loads(response.read())["choices"][0]["message"]["content"]
         if not isinstance(content, str) or not content.strip():
             logger.warning("LLM study generation returned empty content; using retrieved paper content instead")
@@ -181,6 +200,10 @@ def _validate_study_artifact(kind: str, result: Any, hits: list[dict[str, Any]])
 def _generation_failure_reason(exc: Exception, api_key: str) -> str:
     """Return a useful short failure explanation without leaking credentials."""
     if isinstance(exc, urllib.error.HTTPError):
+        if exc.code == 503:
+            return "Gemini is temporarily overloaded (HTTP 503). ScholarMind retried the request; wait a minute and try again."
+        if exc.code == 429:
+            return "Gemini rate limit or quota reached (HTTP 429). Wait for the limit to reset or check usage and billing in Google AI Studio."
         try:
             body = json.loads(exc.read().decode("utf-8", errors="replace"))
             detail = body.get("error", {}).get("message", "") if isinstance(body, dict) else ""
