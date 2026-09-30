@@ -7,6 +7,7 @@ import os
 import random
 import re
 import socket
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -16,12 +17,29 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
-@lru_cache(maxsize=1)
-def embedding_model() -> Any:
-    # Delay importing Torch/Sentence Transformers until a paper actually needs indexing.
-    from sentence_transformers import SentenceTransformer
+_embedding_model_instance: Any | None = None
+_embedding_model_lock = threading.Lock()
 
-    return SentenceTransformer(os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2"))
+def embedding_model() -> Any:
+    """Load the shared embedding model once, avoiding concurrent cold-load races."""
+    global _embedding_model_instance
+    if _embedding_model_instance is not None:
+        return _embedding_model_instance
+
+    with _embedding_model_lock:
+        if _embedding_model_instance is None:
+            # Delay importing Torch/Sentence Transformers until the first paper or chat.
+            from sentence_transformers import SentenceTransformer
+
+            # Transformers' low-memory path constructs weights on PyTorch's `meta`
+            # device. Some Windows/Torch combinations leave a weight on `meta`,
+            # causing Module.to() to raise "Cannot copy out of meta tensor".
+            # This small 22M-parameter model fits comfortably when loaded normally.
+            _embedding_model_instance = SentenceTransformer(
+                os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2"),
+                model_kwargs={"low_cpu_mem_usage": False},
+            )
+    return _embedding_model_instance
 
 def embed(texts: list[str]) -> list[list[float]]:
     # Larger batches reduce the number of model passes when indexing a PDF.
