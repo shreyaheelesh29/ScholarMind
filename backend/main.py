@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import hashlib
 import shutil
 import uuid
 from functools import lru_cache
@@ -23,7 +24,8 @@ from database import (create_user, find_user_by_email, get_paper, get_user, hybr
                       list_paper_annotations, list_user_data, list_user_notifications, get_user_settings,
                       mark_user_notifications_read, update_user_settings, record_activity, record_login, save_artifact,
                       save_paper_annotation, delete_paper_annotation,
-                      save_chat_message, save_chunks, save_paper, sync_admin_emails)
+                      save_chat_message, save_chunks, save_paper_if_unique, sync_admin_emails,
+                      find_duplicate_paper)
 from rag import answer, citations_for, embed, embed_query, generate_study_artifact
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -160,6 +162,20 @@ def pdf_index(file_path: str) -> dict[str, Any]:
             for page_number, titles in enumerate(detected, start=1)
         ]
         return {"contents": contents, "pages": pages}
+
+
+def sha256_file(file_path: Path) -> str:
+    digest = hashlib.sha256()
+    with file_path.open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def duplicate_upload_result(paper: dict[str, Any]) -> dict[str, Any]:
+    return {"paper_id": paper["id"], "filename": paper["filename"],
+            "total_pages": paper["page_count"], "status": "duplicate",
+            "duplicate_of": paper["id"]}
 
 
 @app.get("/api/health")
@@ -347,6 +363,15 @@ def upload_paper(file: UploadFile = File(...), user: dict[str, Any] = Depends(cu
         file_path.unlink(missing_ok=True)
         raise HTTPException(status_code=413, detail="PDF must be 100 MB or smaller")
     try:
+        content_sha256 = sha256_file(file_path)
+        duplicate = find_duplicate_paper(user["id"], content_sha256)
+        if duplicate:
+            file_path.unlink(missing_ok=True)
+            record_activity(user["id"], "duplicate_upload_skipped", {
+                "paper_id": duplicate["id"], "filename": safe_name,
+            })
+            return duplicate_upload_result(duplicate)
+
         pdf, chunks, next_number = pymupdf.open(file_path), [], 1
         for page_number, page in enumerate(pdf, start=1):
             page_chunks = chunk_text(page.get_text("text"), paper_id, page_number, start_number=next_number)
@@ -356,8 +381,16 @@ def upload_paper(file: UploadFile = File(...), user: dict[str, Any] = Depends(cu
         pdf.close()
         if not chunks:
             raise ValueError("No extractable text was found. This PDF may need OCR support.")
-        save_paper(paper_id, safe_name, str(file_path), page_count, user["id"])
-        save_chunks(chunks, embed([chunk["text"] for chunk in chunks]))
+        embeddings = embed([chunk["text"] for chunk in chunks])
+        saved = save_paper_if_unique(paper_id, safe_name, str(file_path), page_count,
+                                     user["id"], content_sha256)
+        if not saved["created"]:
+            file_path.unlink(missing_ok=True)
+            record_activity(user["id"], "duplicate_upload_skipped", {
+                "paper_id": saved["paper"]["id"], "filename": safe_name,
+            })
+            return duplicate_upload_result(saved["paper"])
+        save_chunks(chunks, embeddings)
         record_activity(user["id"], "paper_uploaded", {"paper_id": paper_id, "filename": safe_name})
     except Exception as exc:
         file_path.unlink(missing_ok=True)

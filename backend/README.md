@@ -12,6 +12,8 @@ Chat sessions and messages are stored per account. `GET /api/chats` lists recent
 
 `POST /api/learning/generate` creates paper-grounded flashcards, mind maps, quizzes, summaries, reports, viva prompts, literature-review content, visualisation outlines, or a PPT outline with speaker notes. Generated work and chat history are stored per user; `GET /api/me/data` returns that account's papers, saved items, and activity history.
 
+PDF uploads are fingerprinted with SHA-256. Uploading an identical file again in the same account skips indexing and links to the existing paper; different accounts keep independent copies. To find and remove identical copies already in the database, stop the backend and run `python deduplicate_papers.py` from this directory for a preview, then `python deduplicate_papers.py --apply` to keep the oldest copy, reassign notes/chat/artifact references, and remove duplicate records and files. Run with the backend Python environment and a working `DATABASE_URL`.
+
 ## Setup
 
 1. Install pgvector for the PostgreSQL server, then create the `scholarmind` database. The backend creates its tables and runs `CREATE EXTENSION IF NOT EXISTS vector` at startup.

@@ -20,8 +20,10 @@ SCHEMA = """
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE TABLE IF NOT EXISTS papers (
  id UUID PRIMARY KEY, filename TEXT NOT NULL, stored_path TEXT NOT NULL,
- page_count INTEGER NOT NULL DEFAULT 0, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+ page_count INTEGER NOT NULL DEFAULT 0, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ content_sha256 TEXT
 );
+ALTER TABLE papers ADD COLUMN IF NOT EXISTS content_sha256 TEXT;
 CREATE TABLE IF NOT EXISTS users (
  id UUID PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE,
  password_hash TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'student',
@@ -29,6 +31,7 @@ CREATE TABLE IF NOT EXISTS users (
 );
 ALTER TABLE papers ADD COLUMN IF NOT EXISTS owner_id UUID REFERENCES users(id) ON DELETE SET NULL;
 CREATE INDEX IF NOT EXISTS papers_owner_idx ON papers(owner_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS papers_owner_sha256_idx ON papers(owner_id, content_sha256) WHERE content_sha256 IS NOT NULL;
 CREATE TABLE IF NOT EXISTS paper_annotations (
  id UUID PRIMARY KEY, paper_id UUID NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -115,6 +118,36 @@ def save_paper(paper_id: str, filename: str, stored_path: str, page_count: int, 
             cursor.execute("INSERT INTO papers (id, filename, stored_path, page_count, owner_id) VALUES (%s, %s, %s, %s, %s)",
                            (paper_id, filename, stored_path, page_count, owner_id))
         conn.commit()
+
+def find_duplicate_paper(owner_id: str, content_sha256: str) -> dict[str, Any] | None:
+    """Find an identical file already uploaded by this account."""
+    with connection() as conn, conn.cursor(row_factory=psycopg.rows.dict_row) as cursor:
+        cursor.execute("""SELECT id::text, filename, page_count, created_at
+                       FROM papers WHERE owner_id = %s AND content_sha256 = %s
+                       ORDER BY created_at, id LIMIT 1""", (owner_id, content_sha256))
+        return cursor.fetchone()
+
+def save_paper_if_unique(paper_id: str, filename: str, stored_path: str, page_count: int,
+                         owner_id: str, content_sha256: str) -> dict[str, Any]:
+    """Atomically recheck and insert, so simultaneous identical uploads cannot race."""
+    with connection() as conn, conn.cursor(row_factory=psycopg.rows.dict_row) as cursor:
+        cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s))",
+                       (owner_id, content_sha256))
+        cursor.execute("""SELECT id::text, filename, page_count, created_at
+                       FROM papers WHERE owner_id = %s AND content_sha256 = %s
+                       ORDER BY created_at, id LIMIT 1""", (owner_id, content_sha256))
+        duplicate = cursor.fetchone()
+        if duplicate:
+            conn.commit()
+            return {"created": False, "paper": duplicate}
+        cursor.execute("""INSERT INTO papers
+                       (id, filename, stored_path, page_count, owner_id, content_sha256)
+                       VALUES (%s, %s, %s, %s, %s, %s)
+                       RETURNING id::text, filename, page_count, created_at""",
+                       (paper_id, filename, stored_path, page_count, owner_id, content_sha256))
+        created = cursor.fetchone()
+        conn.commit()
+        return {"created": True, "paper": created}
 
 def save_chunks(chunks: list[dict[str, Any]], embeddings: list[list[float]]) -> None:
     rows = [(c["paper_id"], c["page_number"], c["chunk_number"], c["section"], c["text"], e)

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import { apiFetch } from "../api";
 import UploadZone from "../components/papers/UploadZone";
 import Button from "../components/ui/Button";
@@ -30,7 +31,10 @@ export default function UploadPaper() {
       body.append("file", upload.file);
       const result = await apiFetch("/papers/upload", { method: "POST", body });
       setUploadedFiles((prev) => prev.map((f) => f.id === upload.id ? {
-        ...f, paperId: result.paper_id, progress: 100, status: "processed", chunkCount: result.total_chunks
+        ...f, paperId: result.paper_id, progress: 100,
+        status: result.status === "duplicate" ? "duplicate" : "processed",
+        duplicateOf: result.duplicate_of, duplicateFilename: result.status === "duplicate" ? result.filename : "",
+        chunkCount: result.total_chunks,
       } : f));
     } catch (error) {
       setUploadedFiles((prev) => prev.map((f) =>
@@ -55,6 +59,7 @@ export default function UploadPaper() {
     uploading: { color: "bg-primary-100 text-primary-700", label: "Uploading" },
     processing: { color: "bg-warning-100 text-warning-700", label: "Uploading & indexing…" },
     processed: { color: "bg-success-100 text-success-700", label: "Ready" },
+    duplicate: { color: "bg-amber-100 text-amber-800", label: "Duplicate skipped" },
     failed: { color: "bg-red-100 text-red-700", label: "Failed" },
   };
 
@@ -117,6 +122,7 @@ export default function UploadPaper() {
                     </span>
                   </div>
                   <p className="text-xs text-slate-500 mt-0.5">{formatSize(f.size)}{f.status === "processing" ? " · Uploading, extracting text, and indexing" : ""}</p>
+                  {f.status === "duplicate" && <p className="mt-1 text-xs text-amber-800">Identical to <strong>{f.duplicateFilename}</strong>, which is already in your library. No second copy was saved. <Link to={`/viewer?paperId=${encodeURIComponent(f.duplicateOf)}`} className="font-semibold underline">Open existing paper</Link></p>}
                   {f.error && <div className="mt-2 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700" role="alert">
                     <p>{f.error}</p>
                     <button type="button" onClick={() => uploadToBackend(f)} className="mt-2 font-semibold underline">Retry upload</button>
