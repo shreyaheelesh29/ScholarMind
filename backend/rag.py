@@ -441,6 +441,28 @@ def _validate_study_artifact(kind: str, result: Any, hits: list[dict[str, Any]])
     if not isinstance(result, dict):
         raise ValueError("Expected a JSON object")
     allowed_pages = {int(hit["page_number"]) for hit in hits}
+
+    def resolve_citation_page(item: dict[str, Any], evidence_text: str, kind_name: str) -> None:
+        """Keep model citations within retrieved pages, repairing common page errors."""
+        page = item.get("page")
+        if isinstance(page, str) and page.strip().isdecimal():
+            page = int(page.strip())
+        if type(page) is int and page in allowed_pages:
+            item["page"] = page
+            return
+
+        query_terms = {word for word in re.findall(r"[a-z0-9]+", evidence_text.casefold()) if len(word) > 2}
+        ranked = []
+        for hit in hits:
+            passage_terms = {
+                word for word in re.findall(r"[a-z0-9]+", str(hit.get("content", "")).casefold())
+                if len(word) > 2
+            }
+            ranked.append((len(query_terms & passage_terms), float(hit.get("score", 0.0) or 0.0), int(hit["page_number"])))
+        if not ranked or max(ranked)[0] == 0:
+            raise ValueError(f"{kind_name} could not be matched to a supplied passage")
+        item["page"] = max(ranked)[2]
+
     if kind == "quiz":
         items = result.get("questions")
         if not isinstance(items, list) or not items:
@@ -456,18 +478,7 @@ def _validate_study_artifact(kind: str, result: Any, hits: list[dict[str, Any]])
             if not isinstance(item.get("explanation"), str) or len(item["explanation"].strip()) < 12:
                 raise ValueError("Quiz explanation is missing")
             # Models sometimes invent page numbers despite explicit instructions.
-            # Resolve those citations locally to the supplied page most relevant
-            # to the question and explanation, so citations remain source-backed.
-            if type(item.get("page")) is not int or item["page"] not in allowed_pages:
-                evidence_text = " ".join([item["question"], item["explanation"], *options])
-                query_terms = {word for word in re.findall(r"[a-z0-9]+", evidence_text.casefold()) if len(word) > 2}
-                ranked = []
-                for hit in hits:
-                    passage_terms = {word for word in re.findall(r"[a-z0-9]+", str(hit.get("content", "")).casefold()) if len(word) > 2}
-                    ranked.append((len(query_terms & passage_terms), float(hit.get("score", 0.0) or 0.0), int(hit["page_number"])))
-                if not ranked or max(ranked)[0] == 0:
-                    raise ValueError("Quiz question could not be matched to a supplied passage")
-                item["page"] = max(ranked)[2]
+            resolve_citation_page(item, " ".join([item["question"], item["explanation"], *options]), "Quiz question")
     elif kind == "flashcards":
         items = result.get("cards")
         if not isinstance(items, list) or not items:
@@ -475,8 +486,7 @@ def _validate_study_artifact(kind: str, result: Any, hits: list[dict[str, Any]])
         for item in items:
             if not isinstance(item, dict) or not all(isinstance(item.get(key), str) and len(item[key].strip()) >= 8 for key in ("front", "back")):
                 raise ValueError("Flashcard needs a meaningful question and answer")
-            if type(item.get("page")) is not int or item["page"] not in allowed_pages:
-                raise ValueError("Flashcard citation page is not in the supplied passages")
+            resolve_citation_page(item, f"{item['front']} {item['back']}", "Flashcard")
     elif kind == "mindmap":
         nodes, edges = result.get("nodes"), result.get("edges")
         if not isinstance(nodes, list) or len(nodes) < 5 or not isinstance(edges, list):
