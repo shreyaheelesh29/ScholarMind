@@ -269,7 +269,7 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
     task_instructions = {
         "quiz": "Create multiple-choice questions that test distinct, important concepts from this paper. Every question must be answerable from the cited passage. Provide exactly four different, plausible options; exactly one is correct. `answer` is the zero-based index (0-3) of that correct option. Explain the answer in one short sentence grounded in the paper.",
         "flashcards": "Create study flashcards, one concept per card. `front` must be a direct, self-contained question. `back` must state the correct answer in one concise sentence, adding a key detail only when supported. Avoid vague prompts and duplicated concepts.",
-        "mindmap": "Return a complete map, never only a title or root: exactly one root plus at least four distinct, paper-specific concepts and four or more labeled links. Use concise concept labels of 2-8 words, using terminology actually present in the passages. Do not add page or quote fields; those are matched to the source by the application. Every node must connect to the root.",
+        "mindmap": "Return a complete map, never only a title or root: exactly one root plus at least four distinct, paper-specific concepts and four or more labeled links. Use concise concept labels of 2-8 words. For every non-root label, include at least one specific content word that appears in the supplied passages; prefer the paper's own terminology over paraphrases. Do not add page or quote fields; those are matched to the source by the application. Every node must connect to the root.",
         "comparison": "Compare only the selected papers represented in SOURCES. Cover shared and differing objectives, methods, data/evaluation, results, and limitations where the text supports them. Each paper_findings entry must include its exact source_id such as S1. Do not invent scores or rank papers; state when a criterion is not reported.",
         "literature_review": "Write a concise thematic synthesis across the selected uploaded papers, not a list of summaries. Each section must cite one or more source IDs such as S1 from the supplied passages. Describe agreements, disagreements, and trends only when supported.",
         "research_gap": "Infer only cautious candidate gaps from explicit limitations, future-work statements, disagreements, or topics absent in the supplied excerpts. Do not claim a gap is novel or absent from all research. Explain the evidence and cite source IDs such as S1. If evidence is insufficient, return an empty gaps array.",
@@ -338,7 +338,32 @@ def _attach_mindmap_evidence(result: Any, hits: list[dict[str, Any]]) -> None:
     token_pattern = re.compile(r"[a-z0-9]+", re.I)
 
     def terms(value: str) -> set[str]:
-        return {word.casefold() for word in token_pattern.findall(value) if len(word) > 1 and word.casefold() not in stop_words}
+        def normalize(word: str) -> str:
+            word = word.casefold()
+            # Small, dependency-free normalization handles common academic
+            # inflections (e.g. devices/device, protocols/protocol) and the
+            # communication/communicate family emitted by small local models.
+            aliases = {
+                "communication": "communic", "communications": "communic",
+                "communicate": "communic", "communicates": "communic",
+                "communicated": "communic", "communicating": "communic",
+                "protocols": "protocol", "devices": "device",
+                "methods": "method", "systems": "system", "approaches": "approach",
+            }
+            if word in aliases:
+                return aliases[word]
+            if len(word) > 5 and word.endswith("ies"):
+                return word[:-3] + "y"
+            if len(word) > 5 and word.endswith("ing"):
+                return word[:-3]
+            if len(word) > 4 and word.endswith("ed"):
+                return word[:-2]
+            if len(word) > 4 and word.endswith("s") and not word.endswith("ss"):
+                return word[:-1]
+            return word
+
+        return {normalize(word) for word in token_pattern.findall(value)
+                if len(word) > 1 and word.casefold() not in stop_words}
 
     def evidence_window(sentence: str, matching_terms: set[str]) -> str | None:
         """Return a 20–180 character verbatim window, preferring one with the concept term."""
@@ -377,15 +402,24 @@ def _attach_mindmap_evidence(result: Any, hits: list[dict[str, Any]]) -> None:
         if not isinstance(node, dict) or not isinstance(node.get("label"), str):
             raise ValueError("Mind map nodes need readable concept labels")
         label = re.sub(r"\s+", " ", node["label"]).strip()
+        # The root is a structural heading and is commonly phrased generically
+        # (e.g. "Paper central topic"). It represents the source as a whole;
+        # requiring literal overlap would reject otherwise fully grounded maps.
+        is_root = str(node.get("id", "")).casefold() == "root"
         label_terms = terms(label)
-        if not label_terms:
+        if not label_terms and not is_root:
             raise ValueError(f'Mind map concept "{label[:80]}" has no matchable paper terms')
 
         best: tuple[int, float, dict[str, Any], str, set[str]] | None = None
         for hit, sentence, sentence_terms in passages:
             overlap = label_terms & sentence_terms
-            # Require a majority of the label's meaningful words to occur in the cited sentence.
-            required = max(1, (len(label_terms) + 1) // 2)
+            # Concept labels are often paraphrases of paper wording. After
+            # normalization, one shared content term is sufficient for short
+            # labels and two for longer ones; requiring a majority rejects
+            # useful labels such as "Protocols for Device Communication" when
+            # the paper uses a related inflection or splits the idea across a
+            # sentence. Evidence remains a verbatim source sentence.
+            required = 0 if is_root else (1 if len(label_terms) <= 3 else 2)
             if len(overlap) < required:
                 continue
             candidate = (len(overlap), float(hit.get("score", 0.0) or 0.0), hit, sentence, overlap)
@@ -421,8 +455,19 @@ def _validate_study_artifact(kind: str, result: Any, hits: list[dict[str, Any]])
                 raise ValueError("Quiz correct-answer index must be from 0 to 3")
             if not isinstance(item.get("explanation"), str) or len(item["explanation"].strip()) < 12:
                 raise ValueError("Quiz explanation is missing")
+            # Models sometimes invent page numbers despite explicit instructions.
+            # Resolve those citations locally to the supplied page most relevant
+            # to the question and explanation, so citations remain source-backed.
             if type(item.get("page")) is not int or item["page"] not in allowed_pages:
-                raise ValueError("Quiz citation page is not in the supplied passages")
+                evidence_text = " ".join([item["question"], item["explanation"], *options])
+                query_terms = {word for word in re.findall(r"[a-z0-9]+", evidence_text.casefold()) if len(word) > 2}
+                ranked = []
+                for hit in hits:
+                    passage_terms = {word for word in re.findall(r"[a-z0-9]+", str(hit.get("content", "")).casefold()) if len(word) > 2}
+                    ranked.append((len(query_terms & passage_terms), float(hit.get("score", 0.0) or 0.0), int(hit["page_number"])))
+                if not ranked or max(ranked)[0] == 0:
+                    raise ValueError("Quiz question could not be matched to a supplied passage")
+                item["page"] = max(ranked)[2]
     elif kind == "flashcards":
         items = result.get("cards")
         if not isinstance(items, list) or not items:
