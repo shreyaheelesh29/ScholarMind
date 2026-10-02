@@ -66,10 +66,11 @@ function OutputValue({ value }) {
   return <div className="space-y-2">{entries.map(([key, item]) => <div key={key}><p className="mb-0.5 text-xs font-bold uppercase tracking-wide text-slate-500">{key.replaceAll("_", " ")}</p><OutputValue value={item} /></div>)}{value.speaker_notes && <div className="border-l-2 border-primary-300 pl-3"><p className="text-xs font-bold uppercase tracking-wide text-primary-700">Presenter notes</p><p className="mt-1 text-sm text-slate-700">{value.speaker_notes}</p></div>}</div>;
 }
 
-export default function ArtifactGenerator({ kinds, heading = "Generate from your paper", multiPaper = false, id, initialPaperId = "", maxPapers = 10, minPapers = 1, promptContext = "", promptPlaceholder = "Optional focus or topic", renderPayload }) {
+export default function ArtifactGenerator({ kinds, heading = "Generate from your paper", multiPaper = false, id, initialPaperId = "", maxPapers = 10, minPapers = 1, promptContext = "", promptPlaceholder = "Optional focus or topic", renderPayload, onQuizGenerated }) {
   const [papers, setPapers] = useState([]);
   const [paperIds, setPaperIds] = useState([]);
   const [kind, setKind] = useState(kinds[0]);
+  const [count, setCount] = useState(8);
   const [prompt, setPrompt] = useState("");
   const [artifact, setArtifact] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -95,9 +96,10 @@ export default function ArtifactGenerator({ kinds, heading = "Generate from your
     try {
       const result = await apiFetch("/learning/generate", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ kind, paper_id: paperIds[0], paper_ids: paperIds, prompt: [promptContext, prompt].filter(Boolean).join("\n\n"), count: 6 }),
+        body: JSON.stringify({ kind, paper_id: paperIds[0], paper_ids: paperIds, prompt: [promptContext, prompt].filter(Boolean).join("\n\n"), count: kind === "quiz" ? count : 6 }),
       });
-      setArtifact(result.artifact);
+      setArtifact(kind === "quiz" && onQuizGenerated ? null : result.artifact);
+      if (kind === "quiz" && onQuizGenerated) onQuizGenerated(result.artifact);
     } catch (err) { setError(err.message); }
     finally { setLoading(false); }
   };
@@ -109,6 +111,7 @@ export default function ArtifactGenerator({ kinds, heading = "Generate from your
       <select aria-label="Material type" value={kind} onChange={(e) => setKind(e.target.value)} disabled={loading} className="rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700">
         {kinds.map((value) => <option key={value} value={value}>{labels[value] || value}</option>)}
       </select>
+      {kind === "quiz" && <label className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700">Questions<select aria-label="Number of quiz questions" value={count} onChange={(e) => setCount(Number(e.target.value))} disabled={loading} className="rounded-md border border-slate-200 px-2 py-1">{[5, 8, 10, 15, 20].map((value) => <option key={value} value={value}>{value}</option>)}</select></label>}
       <button disabled={paperIds.length < minPapers || loading || loadingPapers} className="rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50">{loading ? "Generating…" : `Generate ${labels[kind] || "material"}`}</button>
       <input value={prompt} onChange={(e) => setPrompt(e.target.value)} maxLength={1000} placeholder={promptPlaceholder} className="rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm md:col-span-3" />
     </form>

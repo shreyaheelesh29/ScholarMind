@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { apiFetch } from "../api";
 import ArtifactGenerator from "../components/research/ArtifactGenerator";
 
@@ -11,50 +11,66 @@ const flashcards = [
   { id: 6, front: "Residual connection + layer norm order?", back: "Pre-LN? No — original Transformer uses: LayerNorm(x + Sublayer(x))." },
 ];
 
-const quizQuestions = [
-  {
-    id: 1,
-    q: "What is the primary reason for using multi-head attention instead of single-head attention?",
-    options: [
-      "It reduces the total number of parameters",
-      "It allows the model to jointly attend to different representation subspaces",
-      "It speeds up inference by parallelizing across GPUs",
-      "It prevents over-fitting by adding stochasticity",
-    ],
-    correct: 1,
-    explain: "Multi-head attention projects Q/K/V h times with different learned projections. Each head learns a different subspace, enabling richer representations.",
-  },
-  {
-    id: 2,
-    q: "In the encoder self-attention, each position can attend to:",
-    options: [
-      "Only previous positions",
-      "All positions in the input sequence",
-      "Only the CLS token",
-      "Exactly one position via argmax",
-    ],
-    correct: 1,
-    explain: "Encoder self-attention is bidirectional (causality mask applied only in decoder self-attention).",
-  },
-  {
-    id: 3,
-    q: "Training recipe: optimizer + learning rate schedule?",
-    options: [
-      "Adam + fixed LR = 1e-4",
-      "Adam + inverse sqrt warmup schedule",
-      "SGD with momentum + cosine decay",
-      "RMSProp + step decay every 10 epochs",
-    ],
-    correct: 1,
-    explain: "Paper uses Adam (β1=0.9, β2=0.98, ε=1e-9) with LR = d_model^-0.5 · min(step^-0.5, step · warmup^-1.5), warmup=4000.",
-  },
-];
+function randomizeQuizOptions(artifact) {
+  const questions = artifact?.payload?.questions;
+  if (!Array.isArray(questions)) return artifact;
+  return { ...artifact, payload: { ...artifact.payload, questions: questions.map((question) => {
+    const options = [...(question.options || [])];
+    const correctOption = options[question.answer];
+    for (let index = options.length - 1; index > 0; index -= 1) {
+      const swapIndex = Math.floor(Math.random() * (index + 1));
+      [options[index], options[swapIndex]] = [options[swapIndex], options[index]];
+    }
+    return { ...question, options, answer: options.indexOf(correctOption) };
+  }) } };
+}
+
+function GeneratedQuiz({ artifact }) {
+  const questions = artifact?.payload?.questions || [];
+  const [answers, setAnswers] = useState({});
+  useEffect(() => setAnswers({}), [artifact?.id]);
+  const answeredCount = Object.keys(answers).length;
+  const score = Object.entries(answers).filter(([index, answer]) => questions[Number(index)]?.answer === answer).length;
+  const quizComplete = questions.length > 0 && answeredCount === questions.length;
+
+  if (!questions.length) return <div className="rounded-xl border border-dashed border-slate-300 bg-white p-8 text-center text-slate-600">Generate a paper-based quiz above to practice here.</div>;
+
+  return <div className="mx-auto max-w-3xl space-y-4">
+    <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white p-4">
+      <div><h2 className="font-bold text-slate-900">{artifact.title}</h2><p className="text-sm text-slate-500">{questions.length} questions · answers are checked against the paper</p></div>
+      <div className="rounded-full bg-primary-50 px-4 py-2 text-sm font-bold text-primary-700">Score: {score}/{questions.length} · {answeredCount}/{questions.length} answered</div>
+      <button onClick={() => setAnswers({})} disabled={!answeredCount} className="rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-600 disabled:opacity-40">Start over</button>
+    </div>
+    {questions.map((question, questionIndex) => {
+      const selectedAnswer = answers[questionIndex];
+      return <article key={`${questionIndex}-${question.question}`} className="space-y-3 rounded-2xl border border-slate-200 bg-white p-5">
+        <div className="flex items-start justify-between gap-3"><div><p className="text-xs font-black uppercase tracking-wider text-primary-600">Question {questionIndex + 1} of {questions.length}</p><h3 className="mt-1 text-lg font-bold leading-snug text-slate-900">{question.question}</h3></div>{question.page && <span className="shrink-0 rounded-full bg-indigo-50 px-2 py-1 text-xs text-indigo-700">p. {question.page}</span>}</div>
+        <div className="space-y-2">{question.options.map((option, optionIndex) => {
+          const isCorrect = optionIndex === question.answer;
+          const isSelected = selectedAnswer === optionIndex;
+          const style = selectedAnswer === undefined ? "border-slate-200 hover:border-primary-300 hover:bg-primary-50/50" : isCorrect ? "border-emerald-300 bg-emerald-50 text-emerald-900" : isSelected ? "border-red-300 bg-red-50 text-red-900" : "border-slate-100 bg-slate-50 text-slate-500";
+          return <button key={optionIndex} disabled={selectedAnswer !== undefined} onClick={() => setAnswers((current) => ({ ...current, [questionIndex]: optionIndex }))} className={`flex w-full items-start gap-3 rounded-xl border p-3 text-left text-sm transition ${style}`}><span className="font-bold">{String.fromCharCode(65 + optionIndex)}.</span><span>{option}</span>{selectedAnswer !== undefined && isCorrect && <span className="ml-auto text-xs font-semibold">Correct</span>}</button>;
+        })}</div>
+        {selectedAnswer !== undefined && <div className="rounded-lg bg-blue-50 p-3"><p className="text-xs font-semibold uppercase tracking-wide text-blue-700">{selectedAnswer === question.answer ? "Correct" : "Review"}</p><p className="mt-1 text-sm leading-relaxed text-slate-700">{question.explanation}</p></div>}
+      </article>;
+    })}
+    {quizComplete && <section aria-live="polite" className="rounded-2xl border-2 border-primary-200 bg-gradient-to-br from-white via-primary-50/50 to-indigo-50 p-6 text-center">
+      <p className="text-xs font-black uppercase tracking-wider text-primary-600">Quiz Results</p><h3 className="mt-2 text-3xl font-black text-slate-900">{score} / {questions.length} correct</h3>
+      <p className="mt-1 text-lg font-bold text-primary-700">{Math.round((score / questions.length) * 100)}%</p>
+      <p className="mt-2 text-slate-600">{score === questions.length ? "Excellent work — you got every question right!" : score >= questions.length * 0.7 ? "Great work — review any missed explanations to strengthen your understanding." : "Review the explanations above, then try again to improve your score."}</p>
+      <button onClick={() => setAnswers({})} className="mt-4 rounded-lg bg-primary-600 px-5 py-2.5 font-bold text-white hover:bg-primary-700">Retake quiz</button>
+    </section>}
+  </div>;
+}
 
 export default function Learning() {
   const [availablePapers, setAvailablePapers] = useState([]);
   const [selectedPaperId, setSelectedPaperId] = useState("");
   const [generatedCards, setGeneratedCards] = useState(null);
   const [generatedMindmap, setGeneratedMindmap] = useState(null);
+  const [generatedQuiz, setGeneratedQuiz] = useState(null);
+  const [quizNotice, setQuizNotice] = useState("");
+  const quizSectionRef = useRef(null);
   const [cardOrder, setCardOrder] = useState(() => flashcards.map((_, index) => index));
   const [cardRatings, setCardRatings] = useState({});
   const [retriedCards, setRetriedCards] = useState(() => new Set());
@@ -67,6 +83,10 @@ export default function Learning() {
       setAvailablePapers(papers);
       if (papers.length) setSelectedPaperId(papers[0].id);
     }).catch((err) => setGenerationError(err.message));
+    apiFetch("/me/data").then(({ artifacts = [] }) => {
+      const lastQuiz = artifacts.find((artifact) => artifact.kind === "quiz" && Array.isArray(artifact.payload?.questions) && artifact.payload.questions.length > 0);
+      if (lastQuiz) setGeneratedQuiz(randomizeQuizOptions(lastQuiz));
+    }).catch(() => {});
   }, []);
   const generateFromPaper = async (kind) => {
     if (!selectedPaperId) { setGenerationError("Upload a paper first, then choose it here."); return; }
@@ -89,34 +109,11 @@ export default function Learning() {
     finally { setGenerating(false); }
   };
   const [tab, setTab] = useState("cards");
+  useEffect(() => {
+    if (generatedQuiz && tab === "quiz") quizSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [generatedQuiz, tab]);
   const [cardIdx, setCardIdx] = useState(0);
   const [flipped, setFlipped] = useState(false);
-  const [quizIdx, setQuizIdx] = useState(0);
-  const [selected, setSelected] = useState(null);
-  const [score, setScore] = useState(0);
-  const [quizDone, setQuizDone] = useState(false);
-  const [answers, setAnswers] = useState(Array(quizQuestions.length).fill(null));
-
-  const handleAnswer = (optIdx) => {
-    if (answers[quizIdx] !== null) return;
-    setSelected(optIdx);
-    const a = [...answers]; a[quizIdx] = optIdx; setAnswers(a);
-    if (optIdx === quizQuestions[quizIdx].correct) setScore(s => s + 1);
-  };
-
-  const nextQuiz = () => {
-    if (quizIdx < quizQuestions.length - 1) {
-      setQuizIdx(quizIdx + 1);
-      setSelected(answers[quizIdx + 1]);
-    } else {
-      setQuizDone(true);
-    }
-  };
-
-  const resetQuiz = () => {
-    setQuizIdx(0); setSelected(null); setScore(0); setQuizDone(false);
-    setAnswers(Array(quizQuestions.length).fill(null));
-  };
 
   const demoMindmapNodes = [
     { id: "center", label: "Transformer", x: 50, y: 50, color: "from-primary-500 to-accent-500", size: "lg" },
@@ -180,12 +177,13 @@ export default function Learning() {
         {generationMode === "ai" && <p className="w-full text-sm font-medium text-emerald-700">AI-generated from the selected PDF.</p>}
       </div>
 
-      <ArtifactGenerator kinds={["quiz", "visualization"]} heading="Generate a source-based quiz or visualization outline" />
+      <ArtifactGenerator kinds={["quiz", "visualization"]} heading="Generate a source-based quiz or visualization outline" onQuizGenerated={(artifact) => { setGeneratedQuiz(randomizeQuizOptions(artifact)); setQuizNotice("Quiz generated. Your questions are shown in the Quiz section below."); setTab("quiz"); }} />
+      {quizNotice && <p role="status" className="-mt-4 rounded-lg bg-emerald-50 px-4 py-2 text-sm font-medium text-emerald-800">{quizNotice}</p>}
 
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
         {[
           { l: "Flashcards Mastered", v: visibleCards.length ? `${Math.round((Object.values(cardRatings).filter((rating) => rating === "got-it").length / visibleCards.length) * 100)}%` : "—", sub: `${Object.keys(cardRatings).length} reviewed of ${visibleCards.length}`, i: "🃏" },
-          { l: "Quiz Score", v: `${score}/${quizQuestions.length}`, sub: quizDone ? "Complete" : "In progress", i: "✅" },
+          { l: "Papers Available", v: availablePapers.length, sub: "Ready for paper-based learning", i: "📄" },
           { l: "Mind Map Topics", v: mindmapNodes.length, sub: "Key concepts linked", i: "🗺" },
           { l: "Study Time", v: "2h 14m", sub: "This week", i: "⏱" },
         ].map((s, i) => (
@@ -202,7 +200,7 @@ export default function Learning() {
         ))}
       </div>
 
-      <div className="flex gap-1 p-1 rounded-xl bg-slate-100 w-fit">
+      <div ref={quizSectionRef} className="scroll-mt-6 flex gap-1 p-1 rounded-xl bg-slate-100 w-fit">
         {[
           { id: "cards", l: "🃏 Flashcards" },
           { id: "quiz", l: "✅ Quiz" },
@@ -269,84 +267,7 @@ export default function Learning() {
         </div>
       )}
 
-      {tab === "quiz" && (
-        <div className="max-w-3xl mx-auto">
-          {!quizDone ? (
-            <div className="rounded-2xl border border-slate-200 bg-white p-7 space-y-5">
-              <div className="flex items-center justify-between">
-                <div>
-                  <span className="text-xs font-black uppercase tracking-wider text-primary-600">Question {quizIdx + 1} of {quizQuestions.length}</span>
-                  <h3 className="mt-1 text-2xl font-black text-slate-900 leading-snug">{quizQuestions[quizIdx].q}</h3>
-                </div>
-                <span className="px-4 py-2 rounded-full bg-primary-50 text-primary-700 text-sm font-black">Score: {score}</span>
-              </div>
-              <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
-                <div className="h-full bg-gradient-to-r from-primary-500 to-accent-500 transition-all" style={{ width: `${((quizIdx + (answers[quizIdx] !== null ? 1 : 0)) / quizQuestions.length) * 100}%` }} />
-              </div>
-
-              <div className="space-y-3">
-                {quizQuestions[quizIdx].options.map((opt, i) => {
-                  const revealed = answers[quizIdx] !== null;
-                  const isCorrect = i === quizQuestions[quizIdx].correct;
-                  const isChosen = selected === i;
-                  let cls = "border-slate-200 bg-white hover:bg-slate-50";
-                  if (revealed && isCorrect) cls = "border-success-400 bg-success-50 ring-2 ring-success-200";
-                  else if (revealed && isChosen && !isCorrect) cls = "border-error-400 bg-error-50 ring-2 ring-error-200";
-                  return (
-                    <button key={i} onClick={() => handleAnswer(i)} className={`w-full p-4 rounded-xl border-2 text-left transition ${cls}`}>
-                      <div className="flex items-start gap-3">
-                        <span className={`w-8 h-8 rounded-lg flex items-center justify-center font-black flex-shrink-0 border-2 ${revealed && isCorrect ? "bg-success-500 border-success-500 text-white" : revealed && isChosen ? "bg-error-500 border-error-500 text-white" : "bg-white border-slate-200 text-slate-500"}`}>
-                          {String.fromCharCode(65 + i)}
-                        </span>
-                        <span className="text-slate-800 font-medium">{opt}</span>
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
-
-              {answers[quizIdx] !== null && (
-                <div className="p-5 rounded-xl bg-slate-50 border border-slate-100 animate-fade-in">
-                  <p className="text-xs font-black uppercase tracking-wider text-primary-600 mb-1">💡 Explanation</p>
-                  <p className="text-sm text-slate-700 leading-relaxed">{quizQuestions[quizIdx].explain}</p>
-                </div>
-              )}
-
-              {answers[quizIdx] !== null && (
-                <button onClick={nextQuiz} className="w-full py-3.5 rounded-xl bg-gradient-to-r from-primary-600 to-primary-500 text-white font-black shadow-lg shadow-primary-500/25 hover:shadow-xl hover:shadow-primary-500/30 transition flex items-center justify-center gap-2">
-                  {quizIdx < quizQuestions.length - 1 ? "Next Question →" : "View Final Results →"}
-                </button>
-              )}
-            </div>
-          ) : (
-            <div className="rounded-2xl border-2 border-primary-200 bg-gradient-to-br from-white via-primary-50/30 to-accent-50/30 p-10 text-center overflow-hidden relative">
-              <div className="absolute -top-16 -right-16 w-64 h-64 rounded-full bg-gradient-to-br from-primary-400/20 to-accent-400/20" />
-              <div className="relative">
-                <div className="w-28 h-28 mx-auto rounded-[2.5rem] bg-gradient-to-br from-primary-500 to-accent-500 flex items-center justify-center shadow-2xl shadow-primary-500/30 mb-6">
-                  <span className="text-6xl font-black text-white">{Math.round((score / quizQuestions.length) * 100)}%</span>
-                </div>
-                <h2 className="text-4xl font-black text-slate-900 mb-2">
-                  {score === quizQuestions.length ? "🎉 Perfect Score!" : score >= 2 ? "🔥 Great Job!" : "📚 Keep Practicing"}
-                </h2>
-                <p className="text-lg text-slate-600 mb-8">
-                  You got <span className="font-black text-primary-700">{score}</span> out of <span className="font-black">{quizQuestions.length}</span> questions correct.
-                </p>
-                <div className="flex flex-wrap items-center justify-center gap-3">
-                  <button onClick={resetQuiz} className="px-6 py-3 rounded-xl border-2 border-slate-200 bg-white text-slate-700 font-bold hover:bg-slate-50 transition flex items-center gap-2">
-                    🔁 Retry Quiz
-                  </button>
-                  <button onClick={() => setTab("cards")} className="px-6 py-3 rounded-xl border-2 border-primary-200 bg-primary-50 text-primary-700 font-bold hover:bg-primary-100 transition flex items-center gap-2">
-                    🃏 Review Flashcards
-                  </button>
-                  <button onClick={() => setTab("map")} className="px-6 py-3 rounded-xl bg-gradient-to-r from-primary-600 to-primary-500 text-white font-black shadow-lg shadow-primary-500/25 hover:shadow-xl hover:shadow-primary-500/30 transition flex items-center gap-2">
-                    🗺 Explore Mind Map →
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
+      {tab === "quiz" && <GeneratedQuiz artifact={generatedQuiz} />}
 
       {tab === "map" && (
         <div className="rounded-2xl border border-slate-200 bg-gradient-to-br from-white via-slate-50 to-primary-50/30 overflow-hidden">

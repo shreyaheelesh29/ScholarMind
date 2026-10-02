@@ -314,7 +314,39 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
         result = json.loads(content[start:end + 1])
         if kind == "mindmap":
             _attach_mindmap_evidence(result, source_hits)
-        _validate_study_artifact(kind, result, source_hits)
+        try:
+            _validate_study_artifact(kind, result, source_hits)
+        except ValueError as validation_error:
+            if kind != "quiz":
+                raise
+            repair_messages = [
+                messages[0],
+                {"role": "user", "content": (
+                    f"Repair this quiz JSON. Validation failed: {validation_error}. "
+                    "Return the same JSON shape with exactly four distinct, plausible options per question, "
+                    "exactly one correct answer, and answer as the correct option's zero-based index. "
+                    "Preserve the intended correct answer and stay faithful to the supplied passages. "
+                    "Use only supplied page numbers. Return JSON only.\n\n"
+                    f"INVALID QUIZ JSON:\n{content}\n\nSOURCES:\n{_context(source_hits, max_chars=context_chars)}"
+                )},
+            ]
+            repaired_content = _chat_request(base_url, model, repair_messages,
+                timeout=120 if local_ollama else 45,
+                max_tokens=generation_tokens.get(kind, 1600),
+                json_mode=True, attempts=1)
+            if not isinstance(repaired_content, str) or not repaired_content.strip():
+                raise ValueError("The model returned an empty corrected quiz")
+            repaired_content = repaired_content.strip()
+            repair_start, repair_end = repaired_content.find("{"), repaired_content.rfind("}")
+            if repair_start < 0 or repair_end < repair_start:
+                raise ValueError("The model did not return a corrected quiz JSON object")
+            result = json.loads(repaired_content[repair_start:repair_end + 1])
+            _validate_study_artifact(kind, result, source_hits)
+        if kind == "quiz":
+            for question in result["questions"]:
+                correct_option = question["options"][question["answer"]]
+                random.shuffle(question["options"])
+                question["answer"] = question["options"].index(correct_option)
         result["_generation_mode"] = "ai"
         return result
     except Exception as exc:
