@@ -250,15 +250,20 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
     base_url = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/")
     local_ollama = _is_local_ollama(base_url)
     compact_study_kind = kind in {"flashcards", "mindmap", "quiz"}
-    generation_count = min(count, 3) if local_ollama and compact_study_kind else min(count, 10)
-    source_hits = hits[:3] if local_ollama and compact_study_kind else hits
+    # Small Ollama models are slower, but silently capping quizzes at three
+    # ignores the count explicitly selected by the user. Keep the tighter cap
+    # for other compact artifacts and honor quiz requests up to the API limit.
+    generation_count = min(count, 10) if (not local_ollama or kind == "quiz") else min(count, 3)
+    source_hits = hits[:min(5, max(3, generation_count))] if local_ollama and kind == "quiz" else (hits[:3] if local_ollama and compact_study_kind else hits)
     if kind == "mindmap":
         shared = (f"Use only the supplied paper passages. Focus requested: {prompt}. "
                   "Return one root plus four to six distinct concepts, with meaningful labeled links. "
                   "Choose concise labels using the paper's own terminology. Return JSON only, with no markdown. "
                   "Return only nodes with id and label, plus edges with source, target, and label; ScholarMind will attach page citations and exact evidence from the PDF.")
     else:
-        shared = (f"Use only the paper passages below. Focus requested: {prompt}. Generate up to {generation_count} useful items. "
+        item_count_instruction = (f"Generate exactly {generation_count} distinct questions. " if kind == "quiz"
+                                  else f"Generate up to {generation_count} useful items. ")
+        shared = (f"Use only the paper passages below. Focus requested: {prompt}. {item_count_instruction}"
                   "Each page must be one of the page numbers shown in the sources. If evidence is insufficient, omit the item. "
                   "Do not copy a passage verbatim as a question; paraphrase and test understanding. Return JSON only, with no markdown.")
     analysis_kinds = {"comparison", "literature_review", "research_gap", "research_ideas"}
@@ -284,9 +289,10 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
         "comparison": 1600, "research_gap": 1500, "research_ideas": 1700,
     }
     if local_ollama:
-        # CPU-bound local models decode slowly. Three concise, source-grounded
-        # items keep normal study-tool requests within a practical wait time.
-        generation_tokens.update({"flashcards": 320, "mindmap": 450, "quiz": 480})
+        # Give requested quiz counts enough output room; the previous fixed
+        # 480-token budget plus a three-question cap caused short quizzes.
+        generation_tokens.update({"flashcards": 320, "mindmap": 450,
+                                  "quiz": max(900, generation_count * 220)})
     context_chars = (500 if local_ollama else 1300) if kind in {"flashcards", "mindmap", "quiz", "visualization", "viva"} else 1800
     messages = [
             {"role": "system", "content": "You are a precise academic learning assistant. Use only supplied source passages and return valid JSON."},
@@ -315,14 +321,14 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
         if kind == "mindmap":
             _attach_mindmap_evidence(result, source_hits)
         try:
-            _validate_study_artifact(kind, result, source_hits)
+            _validate_study_artifact(kind, result, source_hits, expected_count=generation_count if kind == "quiz" else None)
         except ValueError as validation_error:
             if kind != "quiz":
                 raise
             repair_messages = [
                 messages[0],
                 {"role": "user", "content": (
-                    f"Repair this quiz JSON. Validation failed: {validation_error}. "
+                    f"Repair this quiz JSON. Validation failed: {validation_error}. Return exactly {generation_count} distinct questions. "
                     "Return the same JSON shape with exactly four distinct, plausible options per question, "
                     "exactly one correct answer, and answer as the correct option's zero-based index. "
                     "Preserve the intended correct answer and stay faithful to the supplied passages. "
@@ -341,7 +347,7 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
             if repair_start < 0 or repair_end < repair_start:
                 raise ValueError("The model did not return a corrected quiz JSON object")
             result = json.loads(repaired_content[repair_start:repair_end + 1])
-            _validate_study_artifact(kind, result, source_hits)
+            _validate_study_artifact(kind, result, source_hits, expected_count=generation_count if kind == "quiz" else None)
         if kind == "quiz":
             for question in result["questions"]:
                 correct_option = question["options"][question["answer"]]
@@ -468,7 +474,7 @@ def _attach_mindmap_evidence(result: Any, hits: list[dict[str, Any]]) -> None:
         node["evidence"] = quote
 
 
-def _validate_study_artifact(kind: str, result: Any, hits: list[dict[str, Any]]) -> None:
+def _validate_study_artifact(kind: str, result: Any, hits: list[dict[str, Any]], expected_count: int | None = None) -> None:
     """Reject malformed or unsupported model output instead of showing it as correct."""
     if not isinstance(result, dict):
         raise ValueError("Expected a JSON object")
@@ -499,6 +505,8 @@ def _validate_study_artifact(kind: str, result: Any, hits: list[dict[str, Any]])
         items = result.get("questions")
         if not isinstance(items, list) or not items:
             raise ValueError("Quiz has no questions")
+        if expected_count is not None and len(items) != expected_count:
+            raise ValueError(f"Quiz has {len(items)} questions; expected {expected_count}")
         for item in items:
             if not isinstance(item, dict) or not isinstance(item.get("question"), str) or len(item["question"].strip()) < 12:
                 raise ValueError("Quiz question is missing or too short")
