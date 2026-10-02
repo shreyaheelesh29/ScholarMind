@@ -26,7 +26,8 @@ from database import (create_user, find_user_by_email, get_paper, get_user, hybr
                       save_paper_annotation, delete_paper_annotation,
                       save_chat_message, save_chunks, save_paper_if_unique, sync_admin_emails,
                       find_duplicate_paper)
-from rag import answer, citations_for, embed, embed_query, generate_study_artifact
+from rag import (answer, chat_retrieval_query, citations_for, deduplicate_chat_hits,
+                 embed, embed_query, filter_research_gap_hits, generate_study_artifact)
 
 BASE_DIR = Path(__file__).resolve().parent
 PAPERS_DIR = Path(os.getenv("PAPER_STORAGE_DIR", str(BASE_DIR / "data" / "papers"))).resolve()
@@ -404,8 +405,6 @@ def chat(request: ChatRequest, user: dict[str, Any] = Depends(current_user)):
     if request.paper_ids:
         for paper_id in request.paper_ids:
             owned_paper(paper_id, user)
-    hits = hybrid_search(request.question, embed_query(request.question), request.paper_ids, request.top_k, owner_id=user["id"])
-    citations = citations_for(hits)
     session = None
     history: list[dict[str, str]] = []
     if request.session_id:
@@ -417,7 +416,13 @@ def chat(request: ChatRequest, user: dict[str, Any] = Depends(current_user)):
         history = [{"role": message["role"], "content": message["content"]}
                    for message in session["messages"][-8:]
                    if message["role"] in {"user", "assistant"}]
-    else:
+    retrieval_query = chat_retrieval_query(request.question, history)
+    candidate_limit = min(request.top_k * 3, 20)
+    candidates = hybrid_search(retrieval_query, embed_query(retrieval_query), request.paper_ids,
+                               candidate_limit, owner_id=user["id"])
+    hits = deduplicate_chat_hits(candidates, request.top_k)
+    citations = citations_for(hits)
+    if session is None:
         session = create_chat_session(user["id"], request.question.strip()[:120], request.paper_ids[0] if request.paper_ids else None)
     save_chat_message(session["id"], "user", request.question)
     response = {"answer": answer(request.question, hits, history), "citations": citations,
@@ -434,6 +439,8 @@ def generate_learning(payload: GenerateRequest, user: dict[str, Any] = Depends(c
     paper_ids = list(dict.fromkeys(payload.paper_ids or ([payload.paper_id] if payload.paper_id else [])))
     if not paper_ids:
         raise HTTPException(status_code=422, detail="Select at least one uploaded paper")
+    if payload.kind == "research_gap" and len(paper_ids) > 4:
+        raise HTTPException(status_code=422, detail="Select no more than four papers for a focused research-gap analysis")
     papers = [owned_paper(paper_id, user) for paper_id in paper_ids]
     paper_names = ", ".join(paper["filename"] for paper in papers)
     focus = payload.prompt.strip()
@@ -443,7 +450,7 @@ def generate_learning(payload: GenerateRequest, user: dict[str, Any] = Depends(c
             "mindmap": "central topic key concepts themes methods results relationships",
             "comparison": "research objectives methodology datasets experiments results limitations contributions",
             "literature_review": "research themes methods findings results limitations trends",
-            "research_gap": "limitations unresolved questions future work missing evidence contradictory findings",
+            "research_gap": "limitations future work unresolved questions open problems study limitations limitations and future work conclusion",
             "research_ideas": "limitations unresolved questions future work methods findings",
     }
     topic_query = retrieval_topics.get(payload.kind)
@@ -453,18 +460,44 @@ def generate_learning(payload: GenerateRequest, user: dict[str, Any] = Depends(c
         query = focus
     else:
         query = f"key findings and main ideas from {paper_names}"
-    query_embedding = embed_query(query)
+    retrieval_query = query
+    if payload.kind == "research_gap":
+        retrieval_query = "study limitations future work future research unresolved questions open problems conclusion"
+        if focus and len(focus) < 160 and "candidate research gaps" not in focus.lower():
+            retrieval_query = f"{retrieval_query} {focus}"
+    query_embedding = embed_query(retrieval_query)
     cross_paper_kinds = {"comparison", "literature_review", "research_gap", "research_ideas"}
-    if payload.kind in cross_paper_kinds and len(paper_ids) > 1:
-        # Retrieve independently per selected paper so a single document cannot crowd out the others.
-        per_paper_limit = max(1, min(4, payload.count // len(paper_ids)))
+    if payload.kind == "research_gap":
+        # Oversample each paper, then remove reference-list chunks before the
+        # model sees them. Keeping papers independent preserves source balance.
+        per_paper_limit = max(2, min(4, (payload.count + len(paper_ids) - 1) // len(paper_ids)))
         hits = []
         for selected_id in paper_ids:
-            hits.extend(hybrid_search(query, query_embedding, [selected_id], per_paper_limit, owner_id=user["id"]))
+            candidates = hybrid_search(retrieval_query, query_embedding, [selected_id], 12, owner_id=user["id"])
+            hits.extend(filter_research_gap_hits(candidates)[:per_paper_limit])
+    elif payload.kind in cross_paper_kinds and len(paper_ids) > 1:
+        # Retrieve independently per selected paper so a single document cannot crowd out the others.
+        minimum_per_paper = 2 if payload.kind == "research_gap" else 1
+        per_paper_limit = max(minimum_per_paper, min(4, payload.count // len(paper_ids)))
+        hits = []
+        for selected_id in paper_ids:
+            hits.extend(hybrid_search(retrieval_query, query_embedding, [selected_id], per_paper_limit, owner_id=user["id"]))
     else:
-        hits = hybrid_search(query, query_embedding, paper_ids, min(payload.count, 10), owner_id=user["id"])
+        hits = hybrid_search(retrieval_query, query_embedding, paper_ids, min(payload.count, 10), owner_id=user["id"])
     if not hits:
-        raise HTTPException(status_code=404, detail="No text passages found for this paper")
+        if payload.kind != "research_gap":
+            raise HTTPException(status_code=404, detail="No text passages found for this paper")
+        content = {
+            "gaps": [],
+            "_generation_mode": "source_review",
+            "_generation_notice": "No relevant limitation, future-work, or unresolved-question passages were found outside the papers’ reference lists. Try other papers or inspect their limitations and conclusion sections.",
+        }
+        kind_title = payload.kind.replace("_", " ").title()
+        artifact_title = (f"{kind_title}: {focus}" if focus else f"{kind_title} from {paper_names}")[:200]
+        artifact = save_artifact(user["id"], payload.kind, artifact_title,
+                                 {**content, "citations": [], "source_paper_ids": paper_ids}, paper_ids[0])
+        record_activity(user["id"], f"generated_{payload.kind}", {"artifact_id": artifact["id"], "paper_ids": paper_ids})
+        return {"artifact": artifact}
     try:
         content = generate_study_artifact(payload.kind, query, hits, payload.count)
     except ValueError as exc:
