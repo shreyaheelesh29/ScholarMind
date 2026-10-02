@@ -285,7 +285,7 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
         "research_ideas": "Propose feasible candidate ideas motivated by the supplied paper evidence and stated gaps. Clearly label them as proposals, not proven novel contributions. Include a testable question, method, evaluation, risks, and source IDs such as S1. Do not invent datasets or results.",
     }
     difficulty_guidance = {
-        "easy": "Test direct recall of clearly stated definitions, terms, and facts. Use straightforward wording and avoid multi-step reasoning.",
+        "simple": "Test direct recall of clearly stated definitions, terms, and facts. Use straightforward wording and avoid multi-step reasoning.",
         "medium": "Test understanding and application of the paper's concepts, methods, and findings. Require a small inference while keeping the answer directly supported by the passages.",
         "hard": "Test deeper analysis by asking the learner to connect concepts, compare methods or findings, or infer implications. Require careful reasoning, but keep every correct answer fully supported by the passages.",
     }
@@ -307,7 +307,7 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
         generation_tokens["quiz"] = min(8192, max(1400, generation_count * 400))
     compact_context_kind = kind in {"flashcards", "mindmap", "quiz", "visualization", "viva"}
     if local_ollama and compact_context_kind:
-        context_chars = 350 if kind == "quiz" and generation_count > 10 else 500
+        context_chars = {"simple": 300, "medium": 400, "hard": 500}[difficulty] if kind == "quiz" else 500
     else:
         context_chars = 1300 if compact_context_kind else 1800
     quiz_timeout = max(120, generation_count * 15) if local_ollama and kind == "quiz" else (120 if local_ollama else 45)

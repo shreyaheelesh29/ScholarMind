@@ -64,7 +64,7 @@ class GenerateRequest(BaseModel):
     paper_ids: list[str] | None = Field(default=None, max_length=10)
     prompt: str = Field(default="", max_length=1000)
     count: int = Field(default=6, ge=1, le=20)
-    difficulty: str = Field(default="medium", pattern="^(easy|medium|hard)$")
+    difficulty: str = Field(default="medium", pattern="^(simple|medium|hard)$")
 
 
 class ArtifactUpdate(BaseModel):

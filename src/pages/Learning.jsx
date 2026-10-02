@@ -177,7 +177,7 @@ export default function Learning() {
         {generationMode === "ai" && <p className="w-full text-sm font-medium text-emerald-700">AI-generated from the selected PDF.</p>}
       </div>
 
-      <ArtifactGenerator kinds={["quiz", "visualization"]} heading="Generate a source-based quiz or visualization outline" onQuizGenerated={(artifact) => { setGeneratedQuiz(randomizeQuizOptions(artifact)); setQuizNotice("Quiz generated. Your questions are shown in the Quiz section below."); setTab("quiz"); }} />
+      <ArtifactGenerator kinds={["quiz", "visualization"]} heading="Generate a source-based quiz or visualization outline" onQuizGenerated={(artifact) => { setGeneratedQuiz(randomizeQuizOptions(artifact)); setQuizNotice(`Your ${artifact.payload?.difficulty || "medium"} quiz is ready below.`); setTab("quiz"); }} />
       {quizNotice && <p role="status" className="-mt-4 rounded-lg bg-emerald-50 px-4 py-2 text-sm font-medium text-emerald-800">{quizNotice}</p>}
 
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
@@ -200,7 +200,7 @@ export default function Learning() {
         ))}
       </div>
 
-      <div ref={quizSectionRef} className="scroll-mt-6 flex gap-1 p-1 rounded-xl bg-slate-100 w-fit">
+      <div className="flex gap-1 p-1 rounded-xl bg-slate-100 w-fit">
         {[
           { id: "cards", l: "🃏 Flashcards" },
           { id: "quiz", l: "✅ Quiz" },
@@ -267,7 +267,7 @@ export default function Learning() {
         </div>
       )}
 
-      {tab === "quiz" && <GeneratedQuiz artifact={generatedQuiz} />}
+      {tab === "quiz" && <div ref={quizSectionRef} className="scroll-mt-6"><GeneratedQuiz artifact={generatedQuiz} /></div>}
 
       {tab === "map" && (
         <div className="rounded-2xl border border-slate-200 bg-gradient-to-br from-white via-slate-50 to-primary-50/30 overflow-hidden">
