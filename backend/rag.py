@@ -212,7 +212,8 @@ def answer(question: str, hits: list[dict[str, Any]], history: list[dict[str, st
     return _extractive_answer(hits)
 
 
-def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], count: int = 8) -> dict[str, Any]:
+def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], count: int = 8,
+                            difficulty: str = "medium") -> dict[str, Any]:
     """Generate a structured learning/research artifact grounded in retrieved passages."""
     if not hits:
         raise ValueError("No relevant paper passages were found. Try a more specific topic or re-upload the PDF.")
@@ -283,7 +284,13 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
         "research_gap": "Infer only cautious candidate gaps from explicit limitations, future-work statements, disagreements, or topics absent in the supplied excerpts. Do not claim a gap is novel or absent from all research. Explain the evidence and cite source IDs such as S1. If evidence is insufficient, return an empty gaps array.",
         "research_ideas": "Propose feasible candidate ideas motivated by the supplied paper evidence and stated gaps. Clearly label them as proposals, not proven novel contributions. Include a testable question, method, evaluation, risks, and source IDs such as S1. Do not invent datasets or results.",
     }
-    instruction = f"{shared} {task_instructions.get(kind, 'Create concise, useful study material grounded in the sources.')} Match this structure: {shape}"
+    difficulty_guidance = {
+        "easy": "Test direct recall of clearly stated definitions, terms, and facts. Use straightforward wording and avoid multi-step reasoning.",
+        "medium": "Test understanding and application of the paper's concepts, methods, and findings. Require a small inference while keeping the answer directly supported by the passages.",
+        "hard": "Test deeper analysis by asking the learner to connect concepts, compare methods or findings, or infer implications. Require careful reasoning, but keep every correct answer fully supported by the passages.",
+    }
+    difficulty_instruction = f" Difficulty: {difficulty}. {difficulty_guidance.get(difficulty, difficulty_guidance['medium'])}" if kind == "quiz" else ""
+    instruction = f"{shared} {task_instructions.get(kind, 'Create concise, useful study material grounded in the sources.')}{difficulty_instruction} Match this structure: {shape}"
     model = os.getenv("LLM_MODEL", "gpt-4o-mini")
     generation_tokens = {
         "flashcards": 900, "mindmap": 1000, "quiz": 1400,
@@ -339,7 +346,7 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
             repair_messages = [
                 messages[0],
                 {"role": "user", "content": (
-                    f"Repair this quiz JSON. Validation failed: {validation_error}. Return exactly {generation_count} distinct questions. Do not return fewer. "
+                    f"Repair this quiz JSON. Validation failed: {validation_error}. Return exactly {generation_count} distinct {difficulty}-difficulty questions. Do not return fewer. "
                     "Return the same JSON shape with exactly four distinct, plausible options per question, "
                     "exactly one correct answer, and answer as the correct option's zero-based index. "
                     "Preserve the intended correct answer and stay faithful to the supplied passages. "
@@ -364,6 +371,7 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
                 correct_option = question["options"][question["answer"]]
                 random.shuffle(question["options"])
                 question["answer"] = question["options"].index(correct_option)
+            result["difficulty"] = difficulty
         result["_generation_mode"] = "ai"
         return result
     except Exception as exc:

@@ -37,7 +37,7 @@ function GeneratedQuiz({ artifact }) {
 
   return <div className="mx-auto max-w-3xl space-y-4">
     <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white p-4">
-      <div><h2 className="font-bold text-slate-900">{artifact.title}</h2><p className="text-sm text-slate-500">{questions.length} questions · answers are checked against the paper</p></div>
+      <div><h2 className="font-bold text-slate-900">{artifact.title}</h2><p className="text-sm text-slate-500">{questions.length} questions · {artifact.payload?.difficulty || "medium"} difficulty · answers are checked against the paper</p></div>
       <div className="rounded-full bg-primary-50 px-4 py-2 text-sm font-bold text-primary-700">Score: {score}/{questions.length} · {answeredCount}/{questions.length} answered</div>
       <button onClick={() => setAnswers({})} disabled={!answeredCount} className="rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-600 disabled:opacity-40">Start over</button>
     </div>

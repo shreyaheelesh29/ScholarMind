@@ -62,7 +62,7 @@ function OutputValue({ value }) {
     ? <div className="space-y-3">{value.map((item, index) => <div key={index} className="rounded-lg border border-slate-100 bg-slate-50 p-3"><OutputValue value={item} /></div>)}</div>
     : <p className="rounded-lg bg-slate-50 p-3 text-sm text-slate-600">No evidence-backed items were identified in the retrieved passages for this request.</p>;
   if (typeof value.question === "string" && Array.isArray(value.options)) return <QuizQuestion value={value} />;
-  const entries = Object.entries(value).filter(([key, item]) => item != null && !["citations", "source_paper_ids", "speaker_notes", "_generation_mode", "_generation_notice"].includes(key));
+  const entries = Object.entries(value).filter(([key, item]) => item != null && !["citations", "source_paper_ids", "speaker_notes", "difficulty", "_generation_mode", "_generation_notice"].includes(key));
   return <div className="space-y-2">{entries.map(([key, item]) => <div key={key}><p className="mb-0.5 text-xs font-bold uppercase tracking-wide text-slate-500">{key.replaceAll("_", " ")}</p><OutputValue value={item} /></div>)}{value.speaker_notes && <div className="border-l-2 border-primary-300 pl-3"><p className="text-xs font-bold uppercase tracking-wide text-primary-700">Presenter notes</p><p className="mt-1 text-sm text-slate-700">{value.speaker_notes}</p></div>}</div>;
 }
 
@@ -71,6 +71,7 @@ export default function ArtifactGenerator({ kinds, heading = "Generate from your
   const [paperIds, setPaperIds] = useState([]);
   const [kind, setKind] = useState(kinds[0]);
   const [count, setCount] = useState("8");
+  const [difficulty, setDifficulty] = useState("medium");
   const [prompt, setPrompt] = useState("");
   const [artifact, setArtifact] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -98,7 +99,7 @@ export default function ArtifactGenerator({ kinds, heading = "Generate from your
     try {
       const result = await apiFetch("/learning/generate", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ kind, paper_id: paperIds[0], paper_ids: paperIds, prompt: [promptContext, prompt].filter(Boolean).join("\n\n"), count: kind === "quiz" ? Number(count) : 6 }),
+        body: JSON.stringify({ kind, paper_id: paperIds[0], paper_ids: paperIds, prompt: [promptContext, prompt].filter(Boolean).join("\n\n"), count: kind === "quiz" ? Number(count) : 6, difficulty: kind === "quiz" ? difficulty : undefined }),
       });
       setArtifact(kind === "quiz" && onQuizGenerated ? null : result.artifact);
       if (kind === "quiz" && onQuizGenerated) onQuizGenerated(result.artifact);
@@ -114,6 +115,7 @@ export default function ArtifactGenerator({ kinds, heading = "Generate from your
         {kinds.map((value) => <option key={value} value={value}>{labels[value] || value}</option>)}
       </select>
       {kind === "quiz" && <label className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700">Questions<input aria-label="Number of quiz questions" type="number" min={3} max={20} step={1} required value={count} onChange={(e) => setCount(e.target.value)} disabled={loading} className="w-20 rounded-md border border-slate-200 px-2 py-1" /></label>}
+      {kind === "quiz" && <label className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700">Difficulty<select aria-label="Quiz difficulty" value={difficulty} onChange={(e) => setDifficulty(e.target.value)} disabled={loading} className="rounded-md border border-slate-200 px-2 py-1"><option value="easy">Easy</option><option value="medium">Medium</option><option value="hard">Hard</option></select></label>}
       <button disabled={paperIds.length < minPapers || loading || loadingPapers} className="rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50">{loading ? "Generating…" : `Generate ${labels[kind] || "material"}`}</button>
       <input value={prompt} onChange={(e) => setPrompt(e.target.value)} maxLength={1000} placeholder={promptPlaceholder} className="rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm md:col-span-3" />
     </form>
@@ -123,6 +125,7 @@ export default function ArtifactGenerator({ kinds, heading = "Generate from your
     {artifact && <div className="space-y-3 rounded-xl border border-slate-200 bg-white p-4">
       <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="font-bold text-slate-900">{artifact.title}</h3><Link to="/my-data" className="text-sm font-semibold text-indigo-700 hover:underline">View saved work</Link></div>
       {artifact.payload?._generation_mode === "source_fallback" && <p role="status" className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-900">{artifact.payload._generation_notice || "Showing retrieved PDF passages because AI generation was unavailable."}</p>}
+      {artifact.payload?.difficulty && <p className="text-xs font-medium capitalize text-indigo-700">Difficulty: {artifact.payload.difficulty}</p>}
       {artifact.payload?._generation_mode === "ai" && <p className="text-xs font-medium text-emerald-700">AI-generated from the selected uploaded paper passages</p>}
       <div className="max-h-[42rem] space-y-3 overflow-auto">{renderPayload ? renderPayload(artifact.payload, { papers, paperIds }) : <OutputValue value={artifact.payload} />}</div>
       {artifact.payload?.citations?.length > 0 && <div className="border-t border-slate-100 pt-3"><p className="text-xs font-bold uppercase tracking-wide text-slate-500">Sources</p><div className="mt-1 flex flex-wrap gap-2">{artifact.payload.citations.map((citation) => <span key={`${citation.number}-${citation.paper_id}-${citation.page}`} className="rounded-full bg-indigo-50 px-2.5 py-1 text-xs text-indigo-800">{citation.paperTitle} · p. {citation.page}</span>)}</div></div>}

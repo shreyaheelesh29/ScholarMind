@@ -64,6 +64,7 @@ class GenerateRequest(BaseModel):
     paper_ids: list[str] | None = Field(default=None, max_length=10)
     prompt: str = Field(default="", max_length=1000)
     count: int = Field(default=6, ge=1, le=20)
+    difficulty: str = Field(default="medium", pattern="^(easy|medium|hard)$")
 
 
 class ArtifactUpdate(BaseModel):
@@ -469,7 +470,7 @@ def generate_learning(payload: GenerateRequest, user: dict[str, Any] = Depends(c
     if not hits:
         raise HTTPException(status_code=404, detail="No text passages found for this paper")
     try:
-        content = generate_study_artifact(payload.kind, query, hits, payload.count)
+        content = generate_study_artifact(payload.kind, query, hits, payload.count, payload.difficulty)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     if content.get("_generation_mode") == "source_fallback":
