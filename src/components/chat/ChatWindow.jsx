@@ -68,6 +68,8 @@ export default function ChatWindow() {
   const [activeSession, setActiveSession] = useState(null);
   const [historyError, setHistoryError] = useState("");
   const [isTyping, setIsTyping] = useState(false);
+  const [copiedMessageId, setCopiedMessageId] = useState(null);
+  const [copyErrorMessageId, setCopyErrorMessageId] = useState(null);
   const messagesEndRef = useRef(null);
   const textareaRef = useRef(null);
 
@@ -109,12 +111,13 @@ export default function ChatWindow() {
     }
   }, [input]);
 
-  const handleSend = async () => {
-    if (!input.trim()) return;
+  const handleSend = async (text = input) => {
+    const question = text.trim();
+    if (!question || isTyping) return;
     const userMsg = {
       id: `u-${Date.now()}`,
       role: "user",
-      content: input,
+      content: question,
       time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
     };
     setMessages((current) => [...current, userMsg]);
@@ -124,7 +127,7 @@ export default function ChatWindow() {
       const result = await apiFetch("/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question: userMsg.content, session_id: activeSession, paper_ids: selectedPaperId ? [selectedPaperId] : null }),
+        body: JSON.stringify({ question, session_id: activeSession, paper_ids: selectedPaperId ? [selectedPaperId] : null }),
       });
       setActiveSession(result.session_id);
       const aiMsg = {
@@ -153,6 +156,23 @@ export default function ChatWindow() {
     }
   };
 
+  const handleCopyAnswer = async (message) => {
+    const sourceList = (message.citations || []).map((citation) =>
+      `[${citation.number}] ${citation.paperTitle}, p. ${citation.page}${citation.section ? ` (${citation.section})` : ""}`
+    );
+    const text = sourceList.length ? `${message.content}\n\nSources\n${sourceList.join("\n")}` : message.content;
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedMessageId(message.id);
+      setCopyErrorMessageId(null);
+      window.setTimeout(() => setCopiedMessageId((current) => current === message.id ? null : current), 1800);
+    } catch {
+      setCopyErrorMessageId(message.id);
+      setCopiedMessageId(null);
+      window.setTimeout(() => setCopyErrorMessageId((current) => current === message.id ? null : current), 2400);
+    }
+  };
+
   const handleNewChat = () => {
     setMessages([]);
     setInput("");
@@ -161,6 +181,7 @@ export default function ChatWindow() {
   };
 
   const activeTitle = sessions.find((session) => session.id === activeSession)?.title || "New Research Chat";
+  const latestAssistantId = [...messages].reverse().find((message) => message.role === "assistant")?.id;
 
   return (
     <div className="h-full flex gap-0 animate-fade-in">
@@ -272,7 +293,7 @@ export default function ChatWindow() {
           {messages.map((msg) => (
             <div
               key={msg.id}
-              className={`flex gap-3 animate-fade-in ${
+              className={`group flex gap-3 animate-fade-in ${
                 msg.role === "user" ? "justify-end" : "justify-start"
               }`}
             >
@@ -366,7 +387,7 @@ export default function ChatWindow() {
                 >
                   <span className="text-[10px] text-slate-400">{msg.time}</span>
                   {msg.role === "assistant" && (
-                    <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100">
+                    <div className="flex items-center gap-0.5 opacity-100 md:opacity-0 md:group-hover:opacity-100 focus-within:opacity-100">
                       <button className="p-1 rounded hover:bg-slate-100 text-slate-400 hover:text-slate-600">
                         <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path
@@ -387,7 +408,12 @@ export default function ChatWindow() {
                           />
                         </svg>
                       </button>
-                      <button className="p-1 rounded hover:bg-slate-100 text-slate-400 hover:text-slate-600">
+                      <button
+                        onClick={() => handleCopyAnswer(msg)}
+                        aria-label={copiedMessageId === msg.id ? "Answer copied" : "Copy answer with sources"}
+                        title={copiedMessageId === msg.id ? "Copied" : "Copy answer with sources"}
+                        className="p-1 rounded hover:bg-slate-100 text-slate-400 hover:text-slate-600"
+                      >
                         <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path
                             strokeLinecap="round"
@@ -400,6 +426,30 @@ export default function ChatWindow() {
                     </div>
                   )}
                 </div>
+                {msg.role === "assistant" && msg.id === latestAssistantId && !isTyping && (msg.citations?.length > 0) && (
+                  <div className="mt-3">
+                    <p className="mb-2 px-1 text-[10px] font-semibold uppercase tracking-wider text-slate-400">Continue exploring</p>
+                    <div className="flex flex-wrap gap-2">
+                      {[
+                        "Explain this more simply",
+                        "What evidence supports this answer?",
+                        "What limitations does the paper mention?",
+                      ].map((suggestion) => (
+                        <button
+                          key={suggestion}
+                          type="button"
+                          onClick={() => handleSend(suggestion)}
+                          disabled={isTyping}
+                          className="rounded-full border border-primary-100 bg-white px-3 py-1.5 text-xs font-medium text-primary-700 transition hover:border-primary-300 hover:bg-primary-50 disabled:cursor-wait disabled:opacity-50"
+                        >
+                          {suggestion}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {copiedMessageId === msg.id && <p role="status" className="mt-1 px-1 text-[11px] text-emerald-700">Answer and sources copied.</p>}
+                {copyErrorMessageId === msg.id && <p role="status" className="mt-1 px-1 text-[11px] text-rose-700">Clipboard access failed. Select and copy the answer manually.</p>}
               </div>
               {msg.role === "user" && (
                 <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-slate-700 to-slate-800 flex items-center justify-center text-white font-bold text-xs flex-shrink-0">
