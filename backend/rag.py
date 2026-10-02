@@ -260,8 +260,8 @@ def filter_research_gap_hits(hits: list[dict[str, Any]]) -> list[dict[str, Any]]
     return [hit for hit in hits if not is_reference_passage(hit)]
 
 
-def _extract_explicit_research_gaps(hits: list[dict[str, Any]], count: int) -> list[dict[str, Any]]:
-    """Return only verbatim sentences that explicitly signal an open issue."""
+def _research_gap_evidence_options(hits: list[dict[str, Any]], count: int) -> list[dict[str, Any]]:
+    """Build exact, page-linked evidence choices before asking the model to analyze gaps."""
     signals = (
         ("Stated future work", re.compile(r"\b(?:future work|future research|further work|further research|future direction|we leave .* for future)\b", re.I)),
         ("Stated limitation", re.compile(r"\b(?:limitations?|shortcomings?|weaknesses?|beyond (?:the )?scope|not addressed|does not address|did not address|not explored|not evaluated|lack of|lacks)\b", re.I)),
@@ -269,7 +269,7 @@ def _extract_explicit_research_gaps(hits: list[dict[str, Any]], count: int) -> l
     )
     results: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for hit in hits:
+    for source_index, hit in enumerate(hits, start=1):
         if is_reference_passage(hit):
             continue
         section = str(hit.get("section") or "").strip()
@@ -287,13 +287,85 @@ def _extract_explicit_research_gaps(hits: list[dict[str, Any]], count: int) -> l
                 continue
             seen.add(normalized)
             results.append({
-                "title": f"{signal}{f' · {section}' if section else ''}",
+                "evidence_id": f"E{len(results) + 1}",
+                "source_id": f"S{source_index}",
+                "signal": signal,
+                "section": section,
                 "evidence": sentence,
-                "sources": [{"paper": str(hit["filename"]), "page": int(hit["page_number"])}],
+                "paper": str(hit["filename"]),
+                "page": int(hit["page_number"]),
             })
             if len(results) >= count:
                 return results
     return results
+
+
+def _exploratory_evidence_options(hits: list[dict[str, Any]], count: int) -> list[dict[str, Any]]:
+    """Offer exact retrieved sentences as anchors for questions, not as gap claims."""
+    results: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for source_index, hit in enumerate(hits, start=1):
+        if is_reference_passage(hit):
+            continue
+        section = str(hit.get("section") or "").strip()
+        for sentence in re.split(r"(?<=[.!?])\s+|\n+", str(hit.get("content") or "")):
+            sentence = re.sub(r"\s+", " ", sentence).strip(" \t\r\n\"'“”")
+            if not 30 <= len(sentence) <= 300:
+                continue
+            normalized = re.sub(r"[^\w]+", " ", sentence.casefold()).strip()
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            results.append({
+                "evidence_id": f"E{len(results) + 1}",
+                "source_id": f"S{source_index}",
+                "signal": "Passage for exploration",
+                "section": section,
+                "evidence": sentence,
+                "paper": str(hit["filename"]),
+                "page": int(hit["page_number"]),
+                "exploratory": True,
+            })
+            if len(results) >= count:
+                return results
+    return results
+
+
+def _extract_explicit_research_gaps(hits: list[dict[str, Any]], count: int) -> list[dict[str, Any]]:
+    """Return only verbatim sentences that explicitly signal an open issue."""
+    results = []
+    for option in _research_gap_evidence_options(hits, count):
+        title = option["signal"]
+        if option["section"]:
+            title += f" · {option['section']}"
+        results.append({
+            "title": title,
+            "evidence": option["evidence"],
+            "sources": [{"paper": option["paper"], "page": option["page"]}],
+        })
+    return results
+
+
+def _attach_research_gap_evidence(result: Any, options: list[dict[str, Any]]) -> None:
+    """Replace model-written quotes with exact backend-selected source text."""
+    if not isinstance(result, dict) or not isinstance(result.get("gaps"), list):
+        raise ValueError("Research gap response needs a gaps list")
+    by_id = {option["evidence_id"]: option for option in options}
+    for gap in result["gaps"]:
+        if not isinstance(gap, dict):
+            raise ValueError("Each research gap must be an object")
+        evidence_id = str(gap.pop("evidence_id", "")).strip().upper()
+        option = by_id.get(evidence_id)
+        if option is None:
+            raise ValueError("Research gap must select one of the supplied evidence IDs")
+        gap["evidence"] = option["evidence"]
+        gap["sources"] = [{"source_id": option["source_id"]}]
+        if option.get("exploratory"):
+            gap["evidence_type"] = "exploratory"
+        if not isinstance(gap.get("title"), str) or len(gap["title"].strip()) < 8:
+            gap["title"] = option["signal"] + (f" · {option['section']}" if option["section"] else "")
+        if not isinstance(gap.get("proposed_direction"), str) or len(gap["proposed_direction"].strip()) < 8:
+            gap["proposed_direction"] = "Test this issue in a focused study and report results across relevant conditions."
 
 
 def _source_review_passages(hits: list[dict[str, Any]], count: int) -> list[dict[str, Any]]:
@@ -385,7 +457,7 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
             "literature_review": '{"sections":[{"title":"Theme...","content":"Synthesis across the selected papers...","sources":[{"source_id":"S1"}]}]}',
             "visualization": '{"visualizations":[{"title":"...","content":"...","page":1}]}',
             "comparison": '{"comparisons":[{"criterion":"Methodology","paper_findings":[{"source_id":"S1","finding":"..."}],"synthesis":"Similarities and differences supported by the cited findings."}]}',
-            "research_gap": '{"gaps":[{"title":"...","evidence":"A short exact quote from a cited passage","why_it_matters":"...","proposed_direction":"...","sources":[{"source_id":"S1"}]}]}',
+            "research_gap": '{"gaps":[{"title":"...","evidence_id":"E1","why_it_matters":"...","proposed_direction":"..."}]}',
             "research_ideas": '{"ideas":[{"title":"...","research_question":"...","motivation":"Gap evidenced in selected papers...","methodology":"...","evaluation":"...","risks":"...","sources":[{"source_id":"S1"}]}]}',
         }[kind]
     else:
@@ -399,6 +471,16 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
         return fallback_data
     base_url = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/")
     local_ollama = _is_local_ollama(base_url)
+    gap_evidence_options = _research_gap_evidence_options(hits, min(count, 8)) if kind == "research_gap" else []
+    exploratory_gap_mode = kind == "research_gap" and not gap_evidence_options
+    if exploratory_gap_mode:
+        gap_evidence_options = _exploratory_evidence_options(hits, min(count, 3))
+    if kind == "research_gap" and not gap_evidence_options:
+        return {
+            "gaps": [],
+            "_generation_mode": "source_review",
+            "_generation_notice": "No retrieved passage explicitly states a limitation, future-work item, or unresolved question. No candidate gap is shown. Try reviewing the paper’s limitations or conclusion section, or select other papers.",
+        }
     compact_study_kind = kind in {"flashcards", "mindmap", "quiz"}
     # Keep small local outputs concise, but honor the requested quiz count.
     generation_count = min(count, 20) if kind == "quiz" else (min(count, 3) if local_ollama and compact_study_kind else min(count, 10))
@@ -431,7 +513,7 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
         "mindmap": "Return a complete map, never only a title or root: exactly one root plus at least four distinct, paper-specific concepts and four or more labeled links. Use concise concept labels of 2-8 words. For every non-root label, include at least one specific content word that appears in the supplied passages; prefer the paper's own terminology over paraphrases. Do not add page or quote fields; those are matched to the source by the application. Every node must connect to the root.",
         "comparison": "Compare only the selected papers represented in SOURCES. Cover shared and differing objectives, methods, data/evaluation, results, and limitations where the text supports them. Each paper_findings entry must include its exact source_id such as S1. Do not invent scores or rank papers; state when a criterion is not reported.",
         "literature_review": "Write a concise thematic synthesis across the selected uploaded papers, not a list of summaries. Each section must cite one or more source IDs such as S1 from the supplied passages. Describe agreements, disagreements, and trends only when supported.",
-        "research_gap": "Return only cautious candidate gaps directly supported by an explicit limitation, stated future-work item, or unresolved question in the supplied passages. Do not infer that a topic is unexplored because it is absent from an excerpt, and do not claim novelty. In each gap's evidence field, copy one short 10-25 word quote exactly from a cited passage (no paraphrase or ellipsis). Explain why it may matter without overstating what the source establishes, then suggest a testable next step. Cite the exact passage with its source ID. If no passage explicitly supports a gap, return an empty gaps array.",
+        "research_gap": ("No explicit limitation or future-work statement was retrieved. Suggest cautious exploratory research questions inspired by the supplied passages; do not call them research gaps, limitations, or missing work, and do not claim novelty. Choose an evidence_id exactly as supplied. ScholarMind will attach the verbatim passage and citation. Briefly explain why the question may be worth investigating and propose a testable next step. Return an empty gaps array if the passages do not support a useful question." if exploratory_gap_mode else "Return only cautious candidate gaps supported by one of the verified evidence options listed below. Select an evidence_id exactly as supplied; do not write or paraphrase evidence quotes and do not create citations, because ScholarMind will attach the exact source text and citation. Do not infer that a topic is unexplored because it is absent from an excerpt, and do not claim novelty. Briefly explain why the stated issue may matter and suggest a testable next step. Return an empty gaps array if none of the supplied evidence options supports a useful candidate gap."),
         "research_ideas": "Propose feasible candidate ideas motivated by the supplied paper evidence and stated gaps. Clearly label them as proposals, not proven novel contributions. Include a testable question, method, evaluation, risks, and source IDs such as S1. Do not invent datasets or results.",
     }
     difficulty_guidance = {
@@ -465,7 +547,7 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
     quiz_context_window = max(2048, generation_tokens["quiz"] + 2200) if local_ollama and kind == "quiz" else None
     messages = [
             {"role": "system", "content": "You are a precise academic learning assistant. Use only supplied source passages and return valid JSON."},
-            {"role": "user", "content": f"{instruction}\n\nSOURCES:\n{_analysis_context(source_hits, max_chars=analysis_context_chars) if kind in analysis_kinds else _context(source_hits, max_chars=context_chars)}"}
+            {"role": "user", "content": f"{instruction}\n\nSOURCES:\n{_analysis_context(source_hits, max_chars=analysis_context_chars) if kind in analysis_kinds else _context(source_hits, max_chars=context_chars)}" + ("\n\nVERIFIED GAP EVIDENCE OPTIONS (choose evidence_id only; the backend attaches exact quotes and citations):\n" + "\n".join(f"{option['evidence_id']} [{option['source_id']}] {option['signal']}: {option['evidence']}" for option in gap_evidence_options) if kind == "research_gap" else "")}
         ]
     try:
         content = _chat_request(base_url, model, messages,
@@ -489,6 +571,22 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
         result = json.loads(content[start:end + 1])
         if kind == "mindmap":
             _attach_mindmap_evidence(result, source_hits)
+        elif kind == "research_gap":
+            _attach_research_gap_evidence(result, gap_evidence_options)
+            if exploratory_gap_mode and not result["gaps"]:
+                result = {
+                    "gaps": [{
+                        "title": f"Explore {option['section'] or 'this topic'}",
+                        "evidence": option["evidence"],
+                        "evidence_type": "exploratory",
+                        "why_it_matters": "This passage is a starting point for a question; it does not establish a research gap.",
+                        "proposed_direction": "Check whether this finding holds across other datasets, populations, or conditions relevant to the paper.",
+                        "sources": [{"paper": option["paper"], "page": option["page"]}],
+                    } for option in gap_evidence_options],
+                    "_generation_mode": "source_exploration",
+                    "_generation_notice": "The model did not suggest a question from the retrieved passages, so these are passage-based starting points to explore, not confirmed research gaps.",
+                }
+                return result
         try:
             _validate_study_artifact(kind, result, source_hits, expected_count=generation_count if kind == "quiz" else None)
         except ValueError as validation_error:
@@ -523,23 +621,49 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
                 random.shuffle(question["options"])
                 question["answer"] = question["options"].index(correct_option)
             result["difficulty"] = difficulty
-        result["_generation_mode"] = "ai"
+        result["_generation_mode"] = "ai_exploratory" if exploratory_gap_mode else "ai"
         return result
     except Exception as exc:
         # A model/provider response must not prevent source-based study material from being saved.
         if kind == "research_gap":
             logger.warning("LLM research-gap output failed validation (%s); reviewing retrieved passages instead.", exc)
             extracted_gaps = _extract_explicit_research_gaps(hits, min(count, 4))
+            reason = str(exc).casefold()
+            if "evidence id" in reason:
+                failure_notice = "The AI reply did not select a usable evidence ID, so its analysis could not be linked to a paper passage. Showing exact statements found in the paper instead."
+            elif "required analysis fields" in reason:
+                failure_notice = "The AI reply was missing a usable title or next step. Showing exact statements found in the paper instead."
+            elif "evidence" in reason or "citation" in reason or "source" in reason:
+                failure_notice = "The AI draft could not be linked to a verifiable evidence passage. Showing exact statements found in the paper instead."
+            else:
+                failure_notice = "The AI draft could not be validated. Showing exact statements found in the paper instead."
             if extracted_gaps:
                 return {
                     "gaps": extracted_gaps,
                     "_generation_mode": "source_extraction",
-                    "_generation_notice": "Ollama’s proposed gaps did not pass source validation. Showing only verbatim sentences that explicitly mention future work, limitations, or unresolved issues; these are source signals, not AI conclusions.",
+                    "_generation_notice": failure_notice + " Review them as source signals, not AI conclusions.",
+                }
+            if exploratory_gap_mode:
+                exploratory_items = []
+                for option in gap_evidence_options:
+                    section = option["section"] or "this topic"
+                    exploratory_items.append({
+                        "title": f"Explore {section[:80]}",
+                        "evidence": option["evidence"],
+                        "evidence_type": "exploratory",
+                        "why_it_matters": "This passage gives a starting point for a question; it does not establish that the paper has a research gap here.",
+                        "proposed_direction": "Check whether this finding holds across other datasets, populations, or conditions relevant to the paper.",
+                        "sources": [{"paper": option["paper"], "page": option["page"]}],
+                    })
+                return {
+                    "gaps": exploratory_items,
+                    "_generation_mode": "source_exploration",
+                    "_generation_notice": failure_notice + " Showing passage-based questions to investigate; these are not confirmed research gaps.",
                 }
             return {
                 "gaps": [],
                 "_generation_mode": "source_review",
-                "_generation_notice": "Ollama’s proposed gaps did not pass source validation, and no retrieved passage explicitly stated a limitation, future-work item, or unresolved question. No candidate gap is being shown. Try other papers or inspect their limitations and conclusion sections.",
+                "_generation_notice": "The AI draft did not match a verifiable evidence passage, and no retrieved passage explicitly stated a limitation, future-work item, or unresolved question. No candidate gap is shown. Try other papers or inspect their limitations and conclusion sections.",
             }
         else:
             logger.warning("LLM study generation failed; using retrieved paper content instead", exc_info=True)
