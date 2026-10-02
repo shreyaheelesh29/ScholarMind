@@ -65,6 +65,7 @@ class GenerateRequest(BaseModel):
     paper_ids: list[str] | None = Field(default=None, max_length=10)
     prompt: str = Field(default="", max_length=1000)
     count: int = Field(default=6, ge=1, le=20)
+    difficulty: str = Field(default="medium", pattern="^(simple|medium|hard)$")
 
 
 class ArtifactUpdate(BaseModel):
@@ -436,6 +437,8 @@ def chat(request: ChatRequest, user: dict[str, Any] = Depends(current_user)):
 
 @app.post("/api/learning/generate", status_code=201)
 def generate_learning(payload: GenerateRequest, user: dict[str, Any] = Depends(current_user)):
+    if payload.kind == "quiz" and payload.count < 3:
+        raise HTTPException(status_code=422, detail="Quiz question count must be between 3 and 20")
     paper_ids = list(dict.fromkeys(payload.paper_ids or ([payload.paper_id] if payload.paper_id else [])))
     if not paper_ids:
         raise HTTPException(status_code=422, detail="Select at least one uploaded paper")
@@ -483,7 +486,8 @@ def generate_learning(payload: GenerateRequest, user: dict[str, Any] = Depends(c
         for selected_id in paper_ids:
             hits.extend(hybrid_search(retrieval_query, query_embedding, [selected_id], per_paper_limit, owner_id=user["id"]))
     else:
-        hits = hybrid_search(retrieval_query, query_embedding, paper_ids, min(payload.count, 10), owner_id=user["id"])
+        retrieval_limit = min(payload.count, 20 if payload.kind == "quiz" else 10)
+        hits = hybrid_search(retrieval_query, query_embedding, paper_ids, retrieval_limit, owner_id=user["id"])
     if not hits:
         if payload.kind != "research_gap":
             raise HTTPException(status_code=404, detail="No text passages found for this paper")
@@ -499,7 +503,7 @@ def generate_learning(payload: GenerateRequest, user: dict[str, Any] = Depends(c
         record_activity(user["id"], f"generated_{payload.kind}", {"artifact_id": artifact["id"], "paper_ids": paper_ids})
         return {"artifact": artifact}
     try:
-        content = generate_study_artifact(payload.kind, query, hits, payload.count)
+        content = generate_study_artifact(payload.kind, query, hits, payload.count, payload.difficulty)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     if content.get("_generation_mode") == "source_fallback":

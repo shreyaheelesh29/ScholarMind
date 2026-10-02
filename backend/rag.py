@@ -160,7 +160,8 @@ def _is_local_ollama(base_url: str) -> bool:
 
 def _chat_request(base_url: str, model: str, messages: list[dict[str, str]], timeout: int,
                   temperature: float = 0.2, max_tokens: int = 2048, json_mode: bool = False,
-                  json_schema: dict[str, Any] | None = None, attempts: int = 3) -> str:
+                  json_schema: dict[str, Any] | None = None, attempts: int = 3,
+                  context_window: int | None = None) -> str:
     """Call local Ollama natively, or use the configured provider's OpenAI-compatible API."""
     if _is_local_ollama(base_url):
         root_url = base_url.removesuffix("/v1").rstrip("/")
@@ -168,9 +169,9 @@ def _chat_request(base_url: str, model: str, messages: list[dict[str, str]], tim
         # CPU-only laptops. Keep the model resident so each study tool does not
         # pay the cold-load cost again immediately after the first request.
         try:
-            num_ctx = max(1024, int(os.getenv("OLLAMA_NUM_CTX", "2048")))
+            num_ctx = max(1024, int(os.getenv("OLLAMA_NUM_CTX", "2048")), context_window or 0)
         except ValueError:
-            num_ctx = 2048
+            num_ctx = max(2048, context_window or 0)
         body: dict[str, Any] = {
             "model": model, "messages": messages, "stream": False,
             "think": False, "keep_alive": os.getenv("OLLAMA_KEEP_ALIVE", "30m"),
@@ -359,7 +360,8 @@ def answer(question: str, hits: list[dict[str, Any]], history: list[dict[str, st
     return _extractive_answer(hits)
 
 
-def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], count: int = 8) -> dict[str, Any]:
+def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], count: int = 8,
+                            difficulty: str = "medium") -> dict[str, Any]:
     """Generate a structured learning/research artifact grounded in retrieved passages."""
     if not hits:
         raise ValueError("No relevant paper passages were found. Try a more specific topic or re-upload the PDF.")
@@ -398,25 +400,25 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
     base_url = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/")
     local_ollama = _is_local_ollama(base_url)
     compact_study_kind = kind in {"flashcards", "mindmap", "quiz"}
-    # Small Ollama models are slower, but silently capping quizzes at three
-    # ignores the count explicitly selected by the user. Keep the tighter cap
-    # for other compact artifacts and honor quiz requests up to the API limit.
-    generation_count = min(count, 10) if (not local_ollama or kind == "quiz") else min(count, 3)
+    # Keep small local outputs concise, but honor the requested quiz count.
+    generation_count = min(count, 20) if kind == "quiz" else (min(count, 3) if local_ollama and compact_study_kind else min(count, 10))
     if kind == "research_gap":
         # Gap claims need close evidence review. Fewer candidates reduce weak,
         # repetitive claims, especially with small local models.
         generation_count = min(count, 2 if local_ollama else 4)
-    source_hits = hits[:min(5, max(3, generation_count))] if local_ollama and kind == "quiz" else (hits[:3] if local_ollama and compact_study_kind else hits)
+    source_hits = hits[:min(10, max(5, generation_count))] if local_ollama and kind == "quiz" else (hits[:3] if local_ollama and compact_study_kind else hits)
     if kind == "mindmap":
         shared = (f"Use only the supplied paper passages. Focus requested: {prompt}. "
                   "Return one root plus four to six distinct concepts, with meaningful labeled links. "
                   "Choose concise labels using the paper's own terminology. Return JSON only, with no markdown. "
                   "Return only nodes with id and label, plus edges with source, target, and label; ScholarMind will attach page citations and exact evidence from the PDF.")
     else:
-        item_count_instruction = (f"Generate exactly {generation_count} distinct questions. " if kind == "quiz"
+        item_count_instruction = (f"Generate exactly {generation_count} distinct questions. Do not return fewer. " if kind == "quiz"
                                   else f"Generate up to {generation_count} useful items. ")
+        evidence_instruction = ("Every quiz question must be answerable from the supplied passages. "
+                                if kind == "quiz" else "If evidence is insufficient, omit the item. ")
         shared = (f"Use only the paper passages below. Focus requested: {prompt}. {item_count_instruction}"
-                  "Each page must be one of the page numbers shown in the sources. If evidence is insufficient, omit the item. "
+                  "Each page must be one of the page numbers shown in the sources. " + evidence_instruction +
                   "Do not copy a passage verbatim as a question; paraphrase and test understanding. Return JSON only, with no markdown.")
     analysis_kinds = {"comparison", "literature_review", "research_gap", "research_ideas"}
     if kind in analysis_kinds:
@@ -424,7 +426,7 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
                   "Each passage has an ID such as [S1]. Cite evidence using only those IDs; do not write filenames or page numbers. "
                   "If evidence is insufficient, omit the unsupported claim. Return JSON only, with no markdown.")
     task_instructions = {
-        "quiz": "Create multiple-choice questions that test distinct, important concepts from this paper. Every question must be answerable from the cited passage. Provide exactly four different, plausible options; exactly one is correct. `answer` is the zero-based index (0-3) of that correct option. Explain the answer in one short sentence grounded in the paper.",
+        "quiz": "Create multiple-choice questions that test distinct, important concepts from this paper. Keep each question, option, and explanation concise. Every question must be answerable from the cited passage. Provide exactly four different, plausible options; exactly one is correct. `answer` is the zero-based index (0-3) of that correct option. Explain the answer in one short sentence grounded in the paper.",
         "flashcards": "Create study flashcards, one concept per card. `front` must be a direct, self-contained question. `back` must state the correct answer in one concise sentence, adding a key detail only when supported. Avoid vague prompts and duplicated concepts.",
         "mindmap": "Return a complete map, never only a title or root: exactly one root plus at least four distinct, paper-specific concepts and four or more labeled links. Use concise concept labels of 2-8 words. For every non-root label, include at least one specific content word that appears in the supplied passages; prefer the paper's own terminology over paraphrases. Do not add page or quote fields; those are matched to the source by the application. Every node must connect to the root.",
         "comparison": "Compare only the selected papers represented in SOURCES. Cover shared and differing objectives, methods, data/evaluation, results, and limitations where the text supports them. Each paper_findings entry must include its exact source_id such as S1. Do not invent scores or rank papers; state when a criterion is not reported.",
@@ -432,7 +434,13 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
         "research_gap": "Return only cautious candidate gaps directly supported by an explicit limitation, stated future-work item, or unresolved question in the supplied passages. Do not infer that a topic is unexplored because it is absent from an excerpt, and do not claim novelty. In each gap's evidence field, copy one short 10-25 word quote exactly from a cited passage (no paraphrase or ellipsis). Explain why it may matter without overstating what the source establishes, then suggest a testable next step. Cite the exact passage with its source ID. If no passage explicitly supports a gap, return an empty gaps array.",
         "research_ideas": "Propose feasible candidate ideas motivated by the supplied paper evidence and stated gaps. Clearly label them as proposals, not proven novel contributions. Include a testable question, method, evaluation, risks, and source IDs such as S1. Do not invent datasets or results.",
     }
-    instruction = f"{shared} {task_instructions.get(kind, 'Create concise, useful study material grounded in the sources.')} Match this structure: {shape}"
+    difficulty_guidance = {
+        "simple": "Test direct recall of clearly stated definitions, terms, and facts. Use straightforward wording and avoid multi-step reasoning.",
+        "medium": "Test understanding and application of the paper's concepts, methods, and findings. Require a small inference while keeping the answer directly supported by the passages.",
+        "hard": "Test deeper analysis by asking the learner to connect concepts, compare methods or findings, or infer implications. Require careful reasoning, but keep every correct answer fully supported by the passages.",
+    }
+    difficulty_instruction = f" Difficulty: {difficulty}. {difficulty_guidance.get(difficulty, difficulty_guidance['medium'])}" if kind == "quiz" else ""
+    instruction = f"{shared} {task_instructions.get(kind, 'Create concise, useful study material grounded in the sources.')}{difficulty_instruction} Match this structure: {shape}"
     model = os.getenv("LLM_MODEL", "gpt-4o-mini")
     generation_tokens = {
         "flashcards": 900, "mindmap": 1000, "quiz": 1400,
@@ -444,20 +452,28 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
         # Give requested quiz counts enough output room; the previous fixed
         # 480-token budget plus a three-question cap caused short quizzes.
         generation_tokens.update({"flashcards": 320, "mindmap": 450,
-                                  "quiz": max(900, generation_count * 220)})
-    context_chars = (500 if local_ollama else 1300) if kind in {"flashcards", "mindmap", "quiz", "visualization", "viva"} else 1800
+                                  "quiz": min(6000, max(1400, generation_count * 300))})
+    elif kind == "quiz":
+        generation_tokens["quiz"] = min(8192, max(1400, generation_count * 400))
+    compact_context_kind = kind in {"flashcards", "mindmap", "quiz", "visualization", "viva"}
+    if local_ollama and compact_context_kind:
+        context_chars = {"simple": 300, "medium": 400, "hard": 500}[difficulty] if kind == "quiz" else 500
+    else:
+        context_chars = 1300 if compact_context_kind else 1800
     analysis_context_chars = 500 if local_ollama and kind == "research_gap" else 1800
+    quiz_timeout = max(120, generation_count * 15) if local_ollama and kind == "quiz" else (120 if local_ollama else 45)
+    quiz_context_window = max(2048, generation_tokens["quiz"] + 2200) if local_ollama and kind == "quiz" else None
     messages = [
             {"role": "system", "content": "You are a precise academic learning assistant. Use only supplied source passages and return valid JSON."},
             {"role": "user", "content": f"{instruction}\n\nSOURCES:\n{_analysis_context(source_hits, max_chars=analysis_context_chars) if kind in analysis_kinds else _context(source_hits, max_chars=context_chars)}"}
         ]
     try:
         content = _chat_request(base_url, model, messages,
-            timeout=120 if local_ollama else 45,
+            timeout=quiz_timeout,
             max_tokens=generation_tokens.get(kind, 1600),
             json_mode=kind != "mindmap",
             json_schema=_mindmap_schema() if kind == "mindmap" and local_ollama else None,
-            attempts=1)
+            attempts=1, context_window=quiz_context_window)
         if not isinstance(content, str) or not content.strip():
             logger.warning("LLM study generation returned empty content; using retrieved paper content instead")
             fallback_data["_generation_mode"] = "source_fallback"
@@ -481,7 +497,7 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
             repair_messages = [
                 messages[0],
                 {"role": "user", "content": (
-                    f"Repair this quiz JSON. Validation failed: {validation_error}. Return exactly {generation_count} distinct questions. "
+                    f"Repair this quiz JSON. Validation failed: {validation_error}. Return exactly {generation_count} distinct {difficulty}-difficulty questions. Do not return fewer. "
                     "Return the same JSON shape with exactly four distinct, plausible options per question, "
                     "exactly one correct answer, and answer as the correct option's zero-based index. "
                     "Preserve the intended correct answer and stay faithful to the supplied passages. "
@@ -490,9 +506,9 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
                 )},
             ]
             repaired_content = _chat_request(base_url, model, repair_messages,
-                timeout=120 if local_ollama else 45,
+                timeout=quiz_timeout,
                 max_tokens=generation_tokens.get(kind, 1600),
-                json_mode=True, attempts=1)
+                json_mode=True, attempts=1, context_window=quiz_context_window)
             if not isinstance(repaired_content, str) or not repaired_content.strip():
                 raise ValueError("The model returned an empty corrected quiz")
             repaired_content = repaired_content.strip()
@@ -506,6 +522,7 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
                 correct_option = question["options"][question["answer"]]
                 random.shuffle(question["options"])
                 question["answer"] = question["options"].index(correct_option)
+            result["difficulty"] = difficulty
         result["_generation_mode"] = "ai"
         return result
     except Exception as exc:

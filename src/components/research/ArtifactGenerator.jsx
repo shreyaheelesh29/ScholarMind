@@ -62,7 +62,7 @@ function OutputValue({ value }) {
     ? <div className="space-y-3">{value.map((item, index) => <div key={index} className="rounded-lg border border-slate-100 bg-slate-50 p-3"><OutputValue value={item} /></div>)}</div>
     : <p className="rounded-lg bg-slate-50 p-3 text-sm text-slate-600">No evidence-backed items were identified in the retrieved passages for this request.</p>;
   if (typeof value.question === "string" && Array.isArray(value.options)) return <QuizQuestion value={value} />;
-  const entries = Object.entries(value).filter(([key, item]) => item != null && !["citations", "source_paper_ids", "speaker_notes", "_generation_mode", "_generation_notice"].includes(key));
+  const entries = Object.entries(value).filter(([key, item]) => item != null && !["citations", "source_paper_ids", "speaker_notes", "difficulty", "_generation_mode", "_generation_notice"].includes(key));
   return <div className="space-y-2">{entries.map(([key, item]) => <div key={key}><p className="mb-0.5 text-xs font-bold uppercase tracking-wide text-slate-500">{key.replaceAll("_", " ")}</p><OutputValue value={item} /></div>)}{value.speaker_notes && <div className="border-l-2 border-primary-300 pl-3"><p className="text-xs font-bold uppercase tracking-wide text-primary-700">Presenter notes</p><p className="mt-1 text-sm text-slate-700">{value.speaker_notes}</p></div>}</div>;
 }
 
@@ -71,6 +71,7 @@ export default function ArtifactGenerator({ kinds, heading = "Generate from your
   const [paperIds, setPaperIds] = useState([]);
   const [kind, setKind] = useState(kinds[0]);
   const [count, setCount] = useState("8");
+  const [difficulty, setDifficulty] = useState("medium");
   const [prompt, setPrompt] = useState("");
   const [artifact, setArtifact] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -93,12 +94,12 @@ export default function ArtifactGenerator({ kinds, heading = "Generate from your
     event.preventDefault();
     if (paperIds.length < minPapers) { setError(`Select at least ${minPapers} uploaded papers before generating this material.`); return; }
     const questionCount = Number(count);
-    if (kind === "quiz" && (!Number.isInteger(questionCount) || questionCount < 1 || questionCount > 20)) { setError("Enter a whole number from 1 to 20."); return; }
+    if (kind === "quiz" && (!Number.isInteger(questionCount) || questionCount < 3 || questionCount > 20)) { setError("Enter a whole number from 3 to 20."); return; }
     setLoading(true); setError(""); setArtifact(null);
     try {
       const result = await apiFetch("/learning/generate", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ kind, paper_id: paperIds[0], paper_ids: paperIds, prompt: [promptContext, prompt].filter(Boolean).join("\n\n"), count: kind === "quiz" ? Number(count) : 6 }),
+        body: JSON.stringify({ kind, paper_id: paperIds[0], paper_ids: paperIds, prompt: [promptContext, prompt].filter(Boolean).join("\n\n"), count: kind === "quiz" ? Number(count) : 6, difficulty: kind === "quiz" ? difficulty : undefined }),
       });
       setArtifact(kind === "quiz" && onQuizGenerated ? null : result.artifact);
       if (kind === "quiz" && onQuizGenerated) onQuizGenerated(result.artifact);
@@ -108,14 +109,15 @@ export default function ArtifactGenerator({ kinds, heading = "Generate from your
 
   return <section id={id} className="space-y-4 rounded-2xl border border-indigo-100 bg-gradient-to-br from-indigo-50/80 via-white to-white p-5 shadow-sm">
     <div><p className="text-xs font-bold uppercase tracking-wider text-indigo-600">Paper-grounded AI</p><h2 className="mt-1 text-lg font-bold text-slate-900">{heading}</h2><p className="mt-1 text-sm text-slate-500">Generated material is saved to your My Data & History.</p></div>
-    <form onSubmit={generate} className="grid gap-3 md:grid-cols-[minmax(180px,1fr)_minmax(150px,0.8fr)_auto]">
-      {multiPaper ? <fieldset disabled={!papers.length || loading || loadingPapers} className="flex max-h-48 flex-col gap-1 overflow-auto rounded-lg border border-slate-200 bg-white p-3 md:col-span-3"><legend className="px-1 text-xs font-bold text-slate-500">Select {minPapers > 1 ? `at least ${minPapers}, ` : ""}up to ${maxPapers} source papers</legend>{papers.map((paper) => <label key={paper.id} className="flex items-center gap-2 text-sm text-slate-700"><input type="checkbox" checked={paperIds.includes(paper.id)} disabled={!paperIds.includes(paper.id) && paperIds.length >= maxPapers} onChange={(e) => { setArtifact(null); setError(""); setPaperIds((ids) => e.target.checked ? [...ids, paper.id] : ids.filter((id) => id !== paper.id)); }} />{paper.filename}</label>)}</fieldset> : <select aria-label="Source paper" value={paperIds[0] || ""} onChange={(e) => { setArtifact(null); setError(""); setPaperIds(e.target.value ? [e.target.value] : []); }} disabled={!papers.length || loading || loadingPapers} className="rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700">{loadingPapers ? <option value="">Loading your papers…</option> : papers.length ? papers.map((paper) => <option key={paper.id} value={paper.id}>{paper.filename}</option>) : <option value="">No uploaded papers</option>}</select>}
+    <form onSubmit={generate} className="grid gap-3 md:grid-cols-[minmax(180px,1fr)_minmax(150px,0.8fr)_auto_auto]">
+      {multiPaper ? <fieldset disabled={!papers.length || loading || loadingPapers} className="flex max-h-48 flex-col gap-1 overflow-auto rounded-lg border border-slate-200 bg-white p-3 md:col-span-4"><legend className="px-1 text-xs font-bold text-slate-500">Select {minPapers > 1 ? `at least ${minPapers}, ` : ""}up to ${maxPapers} source papers</legend>{papers.map((paper) => <label key={paper.id} className="flex items-center gap-2 text-sm text-slate-700"><input type="checkbox" checked={paperIds.includes(paper.id)} disabled={!paperIds.includes(paper.id) && paperIds.length >= maxPapers} onChange={(e) => { setArtifact(null); setError(""); setPaperIds((ids) => e.target.checked ? [...ids, paper.id] : ids.filter((id) => id !== paper.id)); }} />{paper.filename}</label>)}</fieldset> : <select aria-label="Source paper" value={paperIds[0] || ""} onChange={(e) => { setArtifact(null); setError(""); setPaperIds(e.target.value ? [e.target.value] : []); }} disabled={!papers.length || loading || loadingPapers} className="rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700">{loadingPapers ? <option value="">Loading your papers…</option> : papers.length ? papers.map((paper) => <option key={paper.id} value={paper.id}>{paper.filename}</option>) : <option value="">No uploaded papers</option>}</select>}
       <select aria-label="Material type" value={kind} onChange={(e) => setKind(e.target.value)} disabled={loading} className="rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700">
         {kinds.map((value) => <option key={value} value={value}>{labels[value] || value}</option>)}
       </select>
-      {kind === "quiz" && <label className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700">Questions<input aria-label="Number of quiz questions" type="number" min={1} max={20} step={1} required value={count} onChange={(e) => setCount(e.target.value)} disabled={loading} className="w-20 rounded-md border border-slate-200 px-2 py-1" /></label>}
-      <button disabled={paperIds.length < minPapers || loading || loadingPapers} className="rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50">{loading ? "Generating…" : `Generate ${labels[kind] || "material"}`}</button>
-      <input value={prompt} onChange={(e) => setPrompt(e.target.value)} maxLength={1000} placeholder={promptPlaceholder} className="rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm md:col-span-3" />
+      {kind === "quiz" && <label className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700">Questions<input aria-label="Number of quiz questions" type="number" min={3} max={20} step={1} required value={count} onChange={(e) => setCount(e.target.value)} disabled={loading} className="w-20 rounded-md border border-slate-200 px-2 py-1" /></label>}
+      {kind === "quiz" && <label className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700">Level<select aria-label="Quiz difficulty" value={difficulty} onChange={(e) => setDifficulty(e.target.value)} disabled={loading} className="rounded-md border border-slate-200 px-2 py-1"><option value="simple">Simple</option><option value="medium">Medium</option><option value="hard">Hard</option></select></label>}
+      <button type="submit" aria-busy={loading} disabled={paperIds.length < minPapers || loading || loadingPapers} className="rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50">{loading ? "Generating…" : kind === "quiz" ? `Generate ${count} ${difficulty} questions` : `Generate ${labels[kind] || "material"}`}</button>
+      <input value={prompt} onChange={(e) => setPrompt(e.target.value)} maxLength={1000} placeholder={promptPlaceholder} className="rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm md:col-span-4" />
     </form>
     {multiPaper && papers.length > 0 && <p className="text-xs text-slate-500">{paperIds.length} of {maxPapers} allowed papers selected{paperIds.length < minPapers ? ` · select at least ${minPapers}` : ""}.</p>}
     {!loadingPapers && papers.length === 0 && !error && <div className="rounded-lg border border-dashed border-slate-300 bg-white p-4 text-sm text-slate-600">Upload and process PDFs before generating this analysis. <Link to="/upload" className="font-semibold text-indigo-700 hover:underline">Go to Upload Papers</Link></div>}
@@ -124,6 +126,7 @@ export default function ArtifactGenerator({ kinds, heading = "Generate from your
       <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="font-bold text-slate-900">{artifact.title}</h3><Link to="/my-data" className="text-sm font-semibold text-indigo-700 hover:underline">View saved work</Link></div>
       {artifact.payload?._generation_mode === "source_fallback" && <p role="status" className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-900">{artifact.payload._generation_notice || "Showing retrieved PDF passages because AI generation was unavailable."}</p>}
       {["source_extraction", "source_review"].includes(artifact.payload?._generation_mode) && <p role="status" className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-900">{artifact.payload._generation_notice}</p>}
+      {artifact.payload?.difficulty && <p className="text-xs font-medium capitalize text-indigo-700">Difficulty: {artifact.payload.difficulty}</p>}
       {artifact.payload?._generation_mode === "ai" && <p className="text-xs font-medium text-emerald-700">AI-generated from the selected uploaded paper passages</p>}
       <div className="max-h-[42rem] space-y-3 overflow-auto">{renderPayload ? renderPayload(artifact.payload, { papers, paperIds }) : <OutputValue value={artifact.payload} />}</div>
       {artifact.payload?.citations?.length > 0 && <div className="border-t border-slate-100 pt-3"><p className="text-xs font-bold uppercase tracking-wide text-slate-500">Sources</p><div className="mt-1 flex flex-wrap gap-2">{artifact.payload.citations.map((citation) => <span key={`${citation.number}-${citation.paper_id}-${citation.page}`} className="rounded-full bg-indigo-50 px-2.5 py-1 text-xs text-indigo-800">{citation.paperTitle} · p. {citation.page}</span>)}</div></div>}
