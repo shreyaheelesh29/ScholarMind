@@ -70,7 +70,7 @@ export default function ArtifactGenerator({ kinds, heading = "Generate from your
   const [papers, setPapers] = useState([]);
   const [paperIds, setPaperIds] = useState([]);
   const [kind, setKind] = useState(kinds[0]);
-  const [count, setCount] = useState(8);
+  const [count, setCount] = useState("8");
   const [prompt, setPrompt] = useState("");
   const [artifact, setArtifact] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -92,11 +92,13 @@ export default function ArtifactGenerator({ kinds, heading = "Generate from your
   const generate = async (event) => {
     event.preventDefault();
     if (paperIds.length < minPapers) { setError(`Select at least ${minPapers} uploaded papers before generating this material.`); return; }
+    const questionCount = Number(count);
+    if (kind === "quiz" && (!Number.isInteger(questionCount) || questionCount < 1 || questionCount > 20)) { setError("Enter a whole number from 1 to 20."); return; }
     setLoading(true); setError(""); setArtifact(null);
     try {
       const result = await apiFetch("/learning/generate", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ kind, paper_id: paperIds[0], paper_ids: paperIds, prompt: [promptContext, prompt].filter(Boolean).join("\n\n"), count: kind === "quiz" ? count : 6 }),
+        body: JSON.stringify({ kind, paper_id: paperIds[0], paper_ids: paperIds, prompt: [promptContext, prompt].filter(Boolean).join("\n\n"), count: kind === "quiz" ? Number(count) : 6 }),
       });
       setArtifact(kind === "quiz" && onQuizGenerated ? null : result.artifact);
       if (kind === "quiz" && onQuizGenerated) onQuizGenerated(result.artifact);
@@ -111,7 +113,7 @@ export default function ArtifactGenerator({ kinds, heading = "Generate from your
       <select aria-label="Material type" value={kind} onChange={(e) => setKind(e.target.value)} disabled={loading} className="rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700">
         {kinds.map((value) => <option key={value} value={value}>{labels[value] || value}</option>)}
       </select>
-      {kind === "quiz" && <label className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700">Questions<select aria-label="Number of quiz questions" value={count} onChange={(e) => setCount(Number(e.target.value))} disabled={loading} className="rounded-md border border-slate-200 px-2 py-1">{[5, 8, 10, 15, 20].map((value) => <option key={value} value={value}>{value}</option>)}</select></label>}
+      {kind === "quiz" && <label className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700">Questions<input aria-label="Number of quiz questions" type="number" min={1} max={20} step={1} required value={count} onChange={(e) => setCount(e.target.value)} disabled={loading} className="w-20 rounded-md border border-slate-200 px-2 py-1" /></label>}
       <button disabled={paperIds.length < minPapers || loading || loadingPapers} className="rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50">{loading ? "Generating…" : `Generate ${labels[kind] || "material"}`}</button>
       <input value={prompt} onChange={(e) => setPrompt(e.target.value)} maxLength={1000} placeholder={promptPlaceholder} className="rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm md:col-span-3" />
     </form>
