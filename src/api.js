@@ -25,6 +25,27 @@ export function clearSession() {
   window.dispatchEvent(new Event("scholarmind-user-updated"));
 }
 
+function readableError(detail) {
+  if (typeof detail === "string") return detail.trim();
+  if (Array.isArray(detail)) {
+    const messages = detail.map((item) => {
+      if (typeof item === "string") return item;
+      if (!item || typeof item !== "object") return "";
+      const message = item.msg || item.message || item.detail;
+      const location = Array.isArray(item.loc) ? item.loc.filter((part) => part !== "body").join(" → ") : "";
+      return message ? `${location ? `${location}: ` : ""}${message}` : "";
+    }).filter(Boolean);
+    return messages.join("; ");
+  }
+  if (detail && typeof detail === "object") {
+    const message = detail.message || detail.msg || detail.error || detail.detail;
+    if (typeof message === "string") return message.trim();
+    if (Array.isArray(message)) return readableError(message);
+    if (message && typeof message === "object") return readableError(message);
+  }
+  return "";
+}
+
 export async function apiFetch(path, options = {}) {
   const headers = new Headers(options.headers || {});
   const token = localStorage.getItem("scholarmind_token");
@@ -36,7 +57,7 @@ export async function apiFetch(path, options = {}) {
     ? await response.json().catch(() => ({}))
     : await response.text().catch(() => "");
   if (!response.ok) {
-    const detail = typeof result === "string" ? result.trim() : result.detail || result.message;
+    const detail = readableError(result?.detail ?? result?.message ?? result?.error ?? result);
     const error = new Error(detail || `Request failed (${response.status})`);
     error.status = response.status;
     throw error;

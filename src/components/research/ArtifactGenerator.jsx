@@ -66,7 +66,7 @@ function OutputValue({ value }) {
   return <div className="space-y-2">{entries.map(([key, item]) => <div key={key}><p className="mb-0.5 text-xs font-bold uppercase tracking-wide text-slate-500">{key.replaceAll("_", " ")}</p><OutputValue value={item} /></div>)}{value.speaker_notes && <div className="border-l-2 border-primary-300 pl-3"><p className="text-xs font-bold uppercase tracking-wide text-primary-700">Presenter notes</p><p className="mt-1 text-sm text-slate-700">{value.speaker_notes}</p></div>}</div>;
 }
 
-export default function ArtifactGenerator({ kinds, heading = "Generate from your paper", multiPaper = false, id, initialPaperId = "", maxPapers = 10, minPapers = 1, promptContext = "", promptPlaceholder = "Optional focus or topic" }) {
+export default function ArtifactGenerator({ kinds, heading = "Generate from your paper", multiPaper = false, id, initialPaperId = "", maxPapers = 10, minPapers = 1, promptContext = "", promptPlaceholder = "Optional focus or topic", renderPayload }) {
   const [papers, setPapers] = useState([]);
   const [paperIds, setPaperIds] = useState([]);
   const [kind, setKind] = useState(kinds[0]);
@@ -119,7 +119,7 @@ export default function ArtifactGenerator({ kinds, heading = "Generate from your
       <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="font-bold text-slate-900">{artifact.title}</h3><Link to="/my-data" className="text-sm font-semibold text-indigo-700 hover:underline">View saved work</Link></div>
       {artifact.payload?._generation_mode === "source_fallback" && <p role="status" className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-900">{artifact.payload._generation_notice || "Showing retrieved PDF passages because AI generation was unavailable."}</p>}
       {artifact.payload?._generation_mode === "ai" && <p className="text-xs font-medium text-emerald-700">AI-generated from the selected uploaded paper passages</p>}
-      <div className="max-h-[32rem] space-y-3 overflow-auto"><OutputValue value={artifact.payload} /></div>
+      <div className="max-h-[42rem] space-y-3 overflow-auto">{renderPayload ? renderPayload(artifact.payload, { papers, paperIds }) : <OutputValue value={artifact.payload} />}</div>
       {artifact.payload?.citations?.length > 0 && <div className="border-t border-slate-100 pt-3"><p className="text-xs font-bold uppercase tracking-wide text-slate-500">Sources</p><div className="mt-1 flex flex-wrap gap-2">{artifact.payload.citations.map((citation) => <span key={`${citation.number}-${citation.paper_id}-${citation.page}`} className="rounded-full bg-indigo-50 px-2.5 py-1 text-xs text-indigo-800">{citation.paperTitle} · p. {citation.page}</span>)}</div></div>}
     </div>}
   </section>;
