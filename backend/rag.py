@@ -96,7 +96,8 @@ def _is_local_ollama(base_url: str) -> bool:
 
 def _chat_request(base_url: str, model: str, messages: list[dict[str, str]], timeout: int,
                   temperature: float = 0.2, max_tokens: int = 2048, json_mode: bool = False,
-                  json_schema: dict[str, Any] | None = None, attempts: int = 3) -> str:
+                  json_schema: dict[str, Any] | None = None, attempts: int = 3,
+                  context_window: int | None = None) -> str:
     """Call local Ollama natively, or use the configured provider's OpenAI-compatible API."""
     if _is_local_ollama(base_url):
         root_url = base_url.removesuffix("/v1").rstrip("/")
@@ -104,9 +105,9 @@ def _chat_request(base_url: str, model: str, messages: list[dict[str, str]], tim
         # CPU-only laptops. Keep the model resident so each study tool does not
         # pay the cold-load cost again immediately after the first request.
         try:
-            num_ctx = max(1024, int(os.getenv("OLLAMA_NUM_CTX", "2048")))
+            num_ctx = max(1024, int(os.getenv("OLLAMA_NUM_CTX", "2048")), context_window or 0)
         except ValueError:
-            num_ctx = 2048
+            num_ctx = max(2048, context_window or 0)
         body: dict[str, Any] = {
             "model": model, "messages": messages, "stream": False,
             "think": False, "keep_alive": os.getenv("OLLAMA_KEEP_ALIVE", "30m"),
@@ -274,7 +275,7 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
                   "Each passage has an ID such as [S1]. Cite evidence using only those IDs; do not write filenames or page numbers. "
                   "If evidence is insufficient, omit the unsupported claim. Return JSON only, with no markdown.")
     task_instructions = {
-        "quiz": "Create multiple-choice questions that test distinct, important concepts from this paper. Every question must be answerable from the cited passage. Provide exactly four different, plausible options; exactly one is correct. `answer` is the zero-based index (0-3) of that correct option. Explain the answer in one short sentence grounded in the paper.",
+        "quiz": "Create multiple-choice questions that test distinct, important concepts from this paper. Keep each question, option, and explanation concise. Every question must be answerable from the cited passage. Provide exactly four different, plausible options; exactly one is correct. `answer` is the zero-based index (0-3) of that correct option. Explain the answer in one short sentence grounded in the paper.",
         "flashcards": "Create study flashcards, one concept per card. `front` must be a direct, self-contained question. `back` must state the correct answer in one concise sentence, adding a key detail only when supported. Avoid vague prompts and duplicated concepts.",
         "mindmap": "Return a complete map, never only a title or root: exactly one root plus at least four distinct, paper-specific concepts and four or more labeled links. Use concise concept labels of 2-8 words. For every non-root label, include at least one specific content word that appears in the supplied passages; prefer the paper's own terminology over paraphrases. Do not add page or quote fields; those are matched to the source by the application. Every node must connect to the root.",
         "comparison": "Compare only the selected papers represented in SOURCES. Cover shared and differing objectives, methods, data/evaluation, results, and limitations where the text supports them. Each paper_findings entry must include its exact source_id such as S1. Do not invent scores or rank papers; state when a criterion is not reported.",
@@ -297,21 +298,24 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
                                   "quiz": min(6000, max(1400, generation_count * 300))})
     elif kind == "quiz":
         generation_tokens["quiz"] = min(8192, max(1400, generation_count * 400))
-    if kind in {"flashcards", "mindmap", "quiz", "visualization", "viva"}:
-        context_chars = 1300 if kind == "quiz" or not local_ollama else 500
+    compact_context_kind = kind in {"flashcards", "mindmap", "quiz", "visualization", "viva"}
+    if local_ollama and compact_context_kind:
+        context_chars = 350 if kind == "quiz" and generation_count > 10 else 500
     else:
-        context_chars = 1800
+        context_chars = 1300 if compact_context_kind else 1800
+    quiz_timeout = max(120, generation_count * 15) if local_ollama and kind == "quiz" else (120 if local_ollama else 45)
+    quiz_context_window = max(2048, generation_tokens["quiz"] + 2200) if local_ollama and kind == "quiz" else None
     messages = [
             {"role": "system", "content": "You are a precise academic learning assistant. Use only supplied source passages and return valid JSON."},
             {"role": "user", "content": f"{instruction}\n\nSOURCES:\n{_analysis_context(source_hits) if kind in analysis_kinds else _context(source_hits, max_chars=context_chars)}"}
         ]
     try:
         content = _chat_request(base_url, model, messages,
-            timeout=120 if local_ollama else 45,
+            timeout=quiz_timeout,
             max_tokens=generation_tokens.get(kind, 1600),
             json_mode=kind != "mindmap",
             json_schema=_mindmap_schema() if kind == "mindmap" and local_ollama else None,
-            attempts=1)
+            attempts=1, context_window=quiz_context_window)
         if not isinstance(content, str) or not content.strip():
             logger.warning("LLM study generation returned empty content; using retrieved paper content instead")
             fallback_data["_generation_mode"] = "source_fallback"
@@ -344,9 +348,9 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
                 )},
             ]
             repaired_content = _chat_request(base_url, model, repair_messages,
-                timeout=120 if local_ollama else 45,
+                timeout=quiz_timeout,
                 max_tokens=generation_tokens.get(kind, 1600),
-                json_mode=True, attempts=1)
+                json_mode=True, attempts=1, context_window=quiz_context_window)
             if not isinstance(repaired_content, str) or not repaired_content.strip():
                 raise ValueError("The model returned an empty corrected quiz")
             repaired_content = repaired_content.strip()
