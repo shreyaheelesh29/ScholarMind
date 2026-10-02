@@ -253,18 +253,20 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
     # Small Ollama models are slower, but silently capping quizzes at three
     # ignores the count explicitly selected by the user. Keep the tighter cap
     # for other compact artifacts and honor quiz requests up to the API limit.
-    generation_count = min(count, 10) if (not local_ollama or kind == "quiz") else min(count, 3)
-    source_hits = hits[:min(5, max(3, generation_count))] if local_ollama and kind == "quiz" else (hits[:3] if local_ollama and compact_study_kind else hits)
+    generation_count = min(count, 20) if kind == "quiz" else (min(count, 3) if local_ollama and compact_study_kind else min(count, 10))
+    source_hits = hits[:min(10, max(5, generation_count))] if local_ollama and kind == "quiz" else (hits[:3] if local_ollama and compact_study_kind else hits)
     if kind == "mindmap":
         shared = (f"Use only the supplied paper passages. Focus requested: {prompt}. "
                   "Return one root plus four to six distinct concepts, with meaningful labeled links. "
                   "Choose concise labels using the paper's own terminology. Return JSON only, with no markdown. "
                   "Return only nodes with id and label, plus edges with source, target, and label; ScholarMind will attach page citations and exact evidence from the PDF.")
     else:
-        item_count_instruction = (f"Generate exactly {generation_count} distinct questions. " if kind == "quiz"
+        item_count_instruction = (f"Generate exactly {generation_count} distinct questions. Do not return fewer. " if kind == "quiz"
                                   else f"Generate up to {generation_count} useful items. ")
+        evidence_instruction = ("Every quiz question must be answerable from the supplied passages. "
+                                if kind == "quiz" else "If evidence is insufficient, omit the item. ")
         shared = (f"Use only the paper passages below. Focus requested: {prompt}. {item_count_instruction}"
-                  "Each page must be one of the page numbers shown in the sources. If evidence is insufficient, omit the item. "
+                  "Each page must be one of the page numbers shown in the sources. " + evidence_instruction +
                   "Do not copy a passage verbatim as a question; paraphrase and test understanding. Return JSON only, with no markdown.")
     analysis_kinds = {"comparison", "literature_review", "research_gap", "research_ideas"}
     if kind in analysis_kinds:
@@ -292,8 +294,13 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
         # Give requested quiz counts enough output room; the previous fixed
         # 480-token budget plus a three-question cap caused short quizzes.
         generation_tokens.update({"flashcards": 320, "mindmap": 450,
-                                  "quiz": max(900, generation_count * 220)})
-    context_chars = (500 if local_ollama else 1300) if kind in {"flashcards", "mindmap", "quiz", "visualization", "viva"} else 1800
+                                  "quiz": min(6000, max(1400, generation_count * 300))})
+    elif kind == "quiz":
+        generation_tokens["quiz"] = min(8192, max(1400, generation_count * 400))
+    if kind in {"flashcards", "mindmap", "quiz", "visualization", "viva"}:
+        context_chars = 1300 if kind == "quiz" or not local_ollama else 500
+    else:
+        context_chars = 1800
     messages = [
             {"role": "system", "content": "You are a precise academic learning assistant. Use only supplied source passages and return valid JSON."},
             {"role": "user", "content": f"{instruction}\n\nSOURCES:\n{_analysis_context(source_hits) if kind in analysis_kinds else _context(source_hits, max_chars=context_chars)}"}
@@ -328,7 +335,7 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
             repair_messages = [
                 messages[0],
                 {"role": "user", "content": (
-                    f"Repair this quiz JSON. Validation failed: {validation_error}. Return exactly {generation_count} distinct questions. "
+                    f"Repair this quiz JSON. Validation failed: {validation_error}. Return exactly {generation_count} distinct questions. Do not return fewer. "
                     "Return the same JSON shape with exactly four distinct, plausible options per question, "
                     "exactly one correct answer, and answer as the correct option's zero-based index. "
                     "Preserve the intended correct answer and stay faithful to the supplied passages. "
