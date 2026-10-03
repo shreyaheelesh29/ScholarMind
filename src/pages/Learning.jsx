@@ -302,8 +302,8 @@ export default function Learning() {
             </svg>
             {mindmapNodes.map(n => (
               <div key={n.id} className="absolute -translate-x-1/2 -translate-y-1/2 cursor-pointer group" style={{ left: `${n.x}%`, top: `${n.y}%` }}>
-                <div className={`rounded-2xl bg-gradient-to-br ${n.color} text-white shadow-xl shadow-primary-500/20 hover:scale-110 hover:shadow-2xl hover:shadow-primary-500/40 transition-all ${n.size === "lg" ? "px-7 py-5" : n.size === "md" ? "px-5 py-3.5" : "px-4 py-2.5"}`}>
-                  <p className={`font-black whitespace-nowrap text-white ${n.size === "lg" ? "text-2xl" : n.size === "md" ? "text-lg" : "text-sm"}`}>{n.label}</p>
+                <div className={`w-fit rounded-2xl border border-white/30 text-white shadow-xl shadow-indigo-900/20 transition-all hover:scale-[1.02] hover:shadow-2xl hover:shadow-indigo-900/30 ${n.size === "lg" ? "min-w-[13rem] max-w-[26rem] px-7 py-5" : "min-w-[10rem] max-w-[20rem] px-5 py-4"}`} style={{ backgroundColor: n.size === "lg" ? "#6d28d9" : "#4f46e5", backgroundImage: n.size === "lg" ? "linear-gradient(135deg, #6d28d9 0%, #4f46e5 52%, #c026d3 100%)" : "linear-gradient(135deg, #0ea5e9 0%, #4f46e5 100%)", textShadow: "0 1px 2px rgba(15,23,42,0.35)" }}>
+                  <p className={`whitespace-normal break-words [overflow-wrap:anywhere] text-center font-extrabold leading-snug text-white ${n.size === "lg" ? "text-xl" : "text-sm sm:text-base"}`}>{n.label}</p>
                   {n.page && <p className="mt-1 text-center text-xs font-semibold text-white/80">Source · p. {n.page}</p>}
                 </div>
                 <div className="absolute left-1/2 z-10 w-64 -translate-x-1/2 top-full mt-2 rounded-lg bg-slate-900 text-white text-xs px-3 py-2 opacity-0 group-hover:opacity-100 transition pointer-events-none whitespace-normal shadow-lg">
