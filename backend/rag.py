@@ -244,15 +244,55 @@ def _mindmap_schema() -> dict[str, Any]:
         "additionalProperties": False,
     }
 
-def _extractive_answer(hits: list[dict[str, Any]]) -> str:
+def _extractive_answer(hits: list[dict[str, Any]], task_type: str = "factual") -> str:
     if not hits:
         return "I could not find relevant content in the uploaded papers. Try a more specific question."
+    paper_groups: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+    for index, hit in enumerate(hits, start=1):
+        paper_groups.setdefault(str(hit["filename"]), []).append((index, hit))
+
+    if task_type == "comparison" and len(paper_groups) < 2:
+        only_paper = next(iter(paper_groups), "the selected papers")
+        return (f"I can’t make a source-based comparison because the retrieved passages cover only **{only_paper}**. "
+                "Upload or select a paper about the other topic, then ask again. Here is the most relevant passage I found:\n\n" +
+                _format_fallback_passage(*paper_groups[only_paper][0]))
+
+    heading = {
+        "comparison": "AI comparison is unavailable, so here is the retrieved evidence grouped by paper.",
+        "synthesis": "AI synthesis is unavailable, so here are concise source passages grouped by paper.",
+    }.get(task_type, "AI synthesis is unavailable, so here are the most relevant source passages.")
+    max_papers = 6 if task_type in {"comparison", "synthesis"} else 3
     passages = []
-    for i, hit in enumerate(hits[:3], start=1):
-        passage = re.sub(r"\s+", " ", hit["content"]).strip()
-        if passage:
-            passages.append(f"**{hit['filename']} — page {hit['page_number']}**\n{passage[:1100]} [{i}]")
-    return "I couldn’t generate a synthesized reply, so here are the most relevant passages I found.\n\n" + "\n\n".join(passages)
+    for paper, paper_hits in list(paper_groups.items())[:max_papers]:
+        selected = paper_hits[:1] if task_type in {"comparison", "synthesis"} else paper_hits[:2]
+        for index, hit in selected:
+            formatted = _format_fallback_passage(index, hit)
+            if formatted:
+                passages.append(formatted)
+    return heading + ("\n\n" + "\n\n".join(passages) if passages else "")
+
+
+def _format_fallback_passage(index: int, hit: dict[str, Any]) -> str:
+    """Render a short, readable exact excerpt with its original citation index."""
+    passage = str(hit.get("content") or "")
+    # PDF layout extraction sometimes leaves box-drawing/block glyphs between
+    # otherwise readable sentences; remove those without rewriting the words.
+    passage = re.sub(r"[\u2500-\u259f]+", " ", passage)
+    sentences = re.split(r"(?<=[.!?])\s+|\n+", passage)
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for sentence in sentences:
+        sentence = re.sub(r"\s+", " ", sentence).strip()
+        normalized = re.sub(r"[^\w]+", " ", sentence.casefold()).strip()
+        if sentence and normalized not in seen:
+            seen.add(normalized)
+            cleaned.append(sentence)
+    excerpt = " ".join(cleaned)
+    if len(excerpt) > 520:
+        excerpt = excerpt[:520].rsplit(" ", 1)[0].rstrip() + "…"
+    if not excerpt:
+        return ""
+    return f"**{hit['filename']} — page {hit['page_number']}**\n{excerpt} [{index}]"
 
 
 def is_reference_passage(hit: dict[str, Any]) -> bool:
@@ -412,7 +452,7 @@ def answer(question: str, hits: list[dict[str, Any]], history: list[dict[str, st
         return "I couldn’t find relevant text in the selected papers. Try asking about a specific term, section, or finding, or check that the PDF finished indexing."
     api_key = os.getenv("LLM_API_KEY")
     if not api_key:
-        return _extractive_answer(hits)
+        return _extractive_answer(hits, task_type)
     base_url = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/")
     model = os.getenv("LLM_MODEL", "gpt-4o-mini")
     task_guidance = {
@@ -443,12 +483,12 @@ def answer(question: str, hits: list[dict[str, Any]], history: list[dict[str, st
         cleaned, citation_count = _keep_valid_chat_citations(generated, len(hits))
         if citation_count == 0:
             logger.warning("LLM chat response had no valid source citation; returning retrieved evidence instead")
-            return _extractive_answer(hits)
+            return _extractive_answer(hits, task_type)
         return cleaned
     except Exception:
         # Keep document chat usable when the optional LLM service is unavailable.
         logger.warning("LLM chat request failed; using retrieved passages instead", exc_info=True)
-    return _extractive_answer(hits)
+    return _extractive_answer(hits, task_type)
 
 
 def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], count: int = 8,
