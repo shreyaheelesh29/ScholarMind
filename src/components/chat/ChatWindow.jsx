@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { apiFetch } from "../../api";
 import Citation from "./Citation";
 
@@ -59,6 +59,7 @@ const renderContentWithCitations = (content, citations) => {
 };
 
 export default function ChatWindow() {
+  const [searchParams, setSearchParams] = useSearchParams();
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [availablePapers, setAvailablePapers] = useState([]);
@@ -80,6 +81,15 @@ export default function ChatWindow() {
     apiFetch("/papers").then(({ papers }) => setAvailablePapers(papers)).catch((error) => setHistoryError(error.message));
     refreshChats();
   }, []);
+
+  useEffect(() => {
+    const question = searchParams.get("question");
+    if (!question) return;
+    setInput(question);
+    const paperId = searchParams.get("paper_id");
+    if (paperId) setSelectedPaperId(paperId);
+    setSearchParams({}, { replace: true });
+  }, [searchParams, setSearchParams]);
 
   const openChat = async (session) => {
     try {
