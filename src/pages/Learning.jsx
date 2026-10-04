@@ -1,7 +1,27 @@
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { apiFetch } from "../api";
+import { apiFetch, getSessionUser } from "../api";
 import ArtifactGenerator from "../components/research/ArtifactGenerator";
+
+function mindmapCacheKey() {
+  const userId = getSessionUser()?.id;
+  return userId ? `scholarmind_mindmap_${userId}` : null;
+}
+
+function cacheMindmap(artifactId, payload) {
+  const key = mindmapCacheKey();
+  if (!key || !payload?.nodes?.length) return;
+  try { localStorage.setItem(key, JSON.stringify({ artifactId, payload })); } catch { /* The database copy remains authoritative. */ }
+}
+
+function readCachedMindmap() {
+  const key = mindmapCacheKey();
+  if (!key) return null;
+  try {
+    const cached = JSON.parse(localStorage.getItem(key) || "null");
+    return cached?.payload?.nodes?.length ? cached : null;
+  } catch { return null; }
+}
 
 const flashcards = [
   { id: 1, front: "What is the formula for scaled dot-product attention?", back: "Attention(Q,K,V) = softmax(QK^T / √d_k) × V" },
@@ -95,6 +115,14 @@ export default function Learning() {
   const mapStageRef = useRef(null);
   const panDragRef = useRef(null);
   useEffect(() => {
+    const cachedMindmap = readCachedMindmap();
+    if (cachedMindmap) {
+      generatedMindmapRef.current = cachedMindmap.payload;
+      setGeneratedMindmap(cachedMindmap.payload);
+      setGeneratedMindmapArtifactId(cachedMindmap.artifactId || null);
+      setSelectedMindmapNodeId("root");
+      setTab("map");
+    }
     apiFetch("/papers").then(({ papers }) => {
       setAvailablePapers(papers);
       if (papers.length) setSelectedPaperId(papers[0].id);
@@ -102,15 +130,37 @@ export default function Learning() {
     apiFetch("/me/data").then(({ artifacts = [] }) => {
       const lastQuiz = artifacts.find((artifact) => artifact.kind === "quiz" && Array.isArray(artifact.payload?.questions) && artifact.payload.questions.length > 0);
       if (lastQuiz) setGeneratedQuiz(randomizeQuizOptions(lastQuiz));
-      const lastMindmap = artifacts.find((artifact) => artifact.kind === "mindmap" && Array.isArray(artifact.payload?.nodes) && artifact.payload.nodes.length > 0);
+      const lastMindmap = artifacts
+        .filter((artifact) => artifact.kind === "mindmap" && Array.isArray(artifact.payload?.nodes) && artifact.payload.nodes.length > 0)
+        .sort((left, right) => new Date(right.updated_at || right.created_at).getTime() - new Date(left.updated_at || left.created_at).getTime())[0];
       if (lastMindmap) {
         generatedMindmapRef.current = lastMindmap.payload;
         setGeneratedMindmap(lastMindmap.payload);
         setGeneratedMindmapArtifactId(lastMindmap.id);
         setSelectedMindmapNodeId("root");
+        setTab("map");
+        cacheMindmap(lastMindmap.id, lastMindmap.payload);
         if (lastMindmap.payload?.source_paper_ids?.[0]) setSelectedPaperId(lastMindmap.payload.source_paper_ids[0]);
       }
     }).catch(() => {});
+  }, []);
+  useEffect(() => {
+    const key = mindmapCacheKey();
+    if (!key) return undefined;
+    const restoreOtherTabMap = (event) => {
+      if (event.key !== key || !event.newValue) return;
+      try {
+        const cached = JSON.parse(event.newValue);
+        if (!cached?.payload?.nodes?.length) return;
+        generatedMindmapRef.current = cached.payload;
+        setGeneratedMindmap(cached.payload);
+        setGeneratedMindmapArtifactId(cached.artifactId || null);
+        setSelectedMindmapNodeId("root");
+        setTab("map");
+      } catch { /* Ignore incomplete cross-tab cache updates. */ }
+    };
+    window.addEventListener("storage", restoreOtherTabMap);
+    return () => window.removeEventListener("storage", restoreOtherTabMap);
   }, []);
   const generateFromPaper = async (kind) => {
     if (!selectedPaperId) { setGenerationError("Upload a paper first, then choose it here."); return; }
@@ -132,6 +182,7 @@ export default function Learning() {
         generatedMindmapRef.current = payload;
         setGeneratedMindmap(payload);
         setGeneratedMindmapArtifactId(result.artifact.id);
+        cacheMindmap(result.artifact.id, payload);
         setSelectedMindmapNodeId("root");
         setCollapsedMindmapNodes(new Set());
         setMindmapZoom(1);
@@ -352,6 +403,7 @@ export default function Learning() {
       };
       generatedMindmapRef.current = updatedMap;
       setGeneratedMindmap(updatedMap);
+      cacheMindmap(generatedMindmapArtifactId, updatedMap);
       setPendingMindmapFocusId(nodeId);
       setCollapsedMindmapNodes((current) => { const next = new Set(current); next.delete(nodeId); return next; });
       setMindmapNotice(`Added ${newChildren.length} source-grounded concepts under ${parent.label}.`);
