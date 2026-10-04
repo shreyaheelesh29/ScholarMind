@@ -26,7 +26,7 @@ from database import (create_user, find_user_by_email, get_paper, get_user, hybr
                       save_paper_annotation, delete_paper_annotation,
                       save_chat_message, save_chunks, save_paper_if_unique, sync_admin_emails,
                       find_duplicate_paper)
-from rag import (answer, chat_retrieval_query, citations_for, deduplicate_chat_hits,
+from rag import (answer, chat_retrieval_query, plan_chat_task, citations_for, deduplicate_chat_hits,
                  embed, embed_query, filter_research_gap_hits, generate_study_artifact)
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -54,7 +54,7 @@ class LoginRequest(BaseModel):
 
 class ChatRequest(BaseModel):
     question: str = Field(min_length=2, max_length=4000)
-    paper_ids: list[str] | None = None
+    paper_ids: list[str] | None = Field(default=None, max_length=10)
     session_id: str | None = None
     top_k: int = Field(default=5, ge=1, le=10)
 
@@ -418,17 +418,50 @@ def chat(request: ChatRequest, user: dict[str, Any] = Depends(current_user)):
                    for message in session["messages"][-8:]
                    if message["role"] in {"user", "assistant"}]
     retrieval_query = chat_retrieval_query(request.question, history)
-    candidate_limit = min(request.top_k * 3, 20)
-    candidates = hybrid_search(retrieval_query, embed_query(retrieval_query), request.paper_ids,
-                               candidate_limit, owner_id=user["id"])
-    hits = deduplicate_chat_hits(candidates, request.top_k)
+    task_plan = plan_chat_task(request.question)
+    candidates = []
+    retrieval_papers = list(dict.fromkeys(request.paper_ids or []))
+    if task_plan["retrieval_strategy"] == "balanced_per_paper":
+        if not retrieval_papers:
+            retrieval_papers = [paper["id"] for paper in list_papers()
+                                if paper.get("owner_id") == user["id"]][:6]
+        else:
+            retrieval_papers = retrieval_papers[:6]
+        if len(retrieval_papers) > 1:
+            effective_top_k = max(request.top_k, len(retrieval_papers))
+            query_embedding = embed_query(retrieval_query)
+            per_paper_limit = min(12, max(4, (effective_top_k * 3 + len(retrieval_papers) - 1) // len(retrieval_papers)))
+            ranked_by_paper = [deduplicate_chat_hits(
+                hybrid_search(retrieval_query, query_embedding, [paper_id], per_paper_limit, owner_id=user["id"]),
+                per_paper_limit,
+            ) for paper_id in retrieval_papers]
+            # Interleave each paper's ranked passages so the context and its
+            # citation ledger cannot be dominated by one long document.
+            for rank in range(per_paper_limit):
+                for paper_hits in ranked_by_paper:
+                    if rank < len(paper_hits):
+                        candidates.append(paper_hits[rank])
+            hits = deduplicate_chat_hits(candidates, effective_top_k)
+        else:
+            candidates = hybrid_search(retrieval_query, embed_query(retrieval_query), retrieval_papers or None,
+                                       min(request.top_k * 3, 20), owner_id=user["id"])
+            hits = deduplicate_chat_hits(candidates, request.top_k)
+    else:
+        candidates = hybrid_search(retrieval_query, embed_query(retrieval_query), request.paper_ids,
+                                   min(request.top_k * 3, 20), owner_id=user["id"])
+        hits = deduplicate_chat_hits(candidates, request.top_k)
     citations = citations_for(hits)
     if session is None:
         session = create_chat_session(user["id"], request.question.strip()[:120], request.paper_ids[0] if request.paper_ids else None)
     save_chat_message(session["id"], "user", request.question)
-    response = {"answer": answer(request.question, hits, history), "citations": citations,
+    response = {"answer": answer(request.question, hits, history, task_type=task_plan["task_type"]), "citations": citations,
                 "sources": [{"type": "page", "label": f"{item['paperTitle']} p.{item['page']}", "page": item["page"]} for item in citations],
-                "mode": "llm" if os.getenv("LLM_API_KEY") else "retrieval-only"}
+                "mode": "llm" if os.getenv("LLM_API_KEY") else "retrieval-only",
+                "retrieval_plan": {
+                    **task_plan,
+                    "papers_retrieved": len({hit["paper_id"] for hit in hits}),
+                    "passages_used": len(hits),
+                }}
     save_chat_message(session["id"], "assistant", response["answer"], citations, response["sources"])
     response["session_id"] = session["id"]
     record_activity(user["id"], "asked_question", {"paper_ids": request.paper_ids or []})
