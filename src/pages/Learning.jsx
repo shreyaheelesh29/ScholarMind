@@ -3,24 +3,21 @@ import { Link } from "react-router-dom";
 import { apiFetch, getSessionUser } from "../api";
 import ArtifactGenerator from "../components/research/ArtifactGenerator";
 
-function mindmapCacheKey() {
+function learningSessionKey() {
   const userId = getSessionUser()?.id;
-  return userId ? `scholarmind_mindmap_${userId}` : null;
+  return userId ? `scholarmind_learning_session_${userId}` : null;
 }
 
-function cacheMindmap(artifactId, payload) {
-  const key = mindmapCacheKey();
-  if (!key || !payload?.nodes?.length) return;
-  try { localStorage.setItem(key, JSON.stringify({ artifactId, payload })); } catch { /* The database copy remains authoritative. */ }
-}
-
-function readCachedMindmap() {
-  const key = mindmapCacheKey();
+function readLearningSession() {
+  const key = learningSessionKey();
   if (!key) return null;
-  try {
-    const cached = JSON.parse(localStorage.getItem(key) || "null");
-    return cached?.payload?.nodes?.length ? cached : null;
-  } catch { return null; }
+  try { return JSON.parse(sessionStorage.getItem(key) || "null"); } catch { return null; }
+}
+
+function writeLearningSession(snapshot) {
+  const key = learningSessionKey();
+  if (!key) return;
+  try { sessionStorage.setItem(key, JSON.stringify(snapshot)); } catch { /* Keep the live in-memory view if storage is unavailable. */ }
 }
 
 const flashcards = [
@@ -46,10 +43,8 @@ function randomizeQuizOptions(artifact) {
   }) } };
 }
 
-function GeneratedQuiz({ artifact }) {
+function GeneratedQuiz({ artifact, answers, setAnswers, onRetake, regenerating = false }) {
   const questions = artifact?.payload?.questions || [];
-  const [answers, setAnswers] = useState({});
-  useEffect(() => setAnswers({}), [artifact?.id]);
   const answeredCount = Object.keys(answers).length;
   const score = Object.entries(answers).filter(([index, answer]) => questions[Number(index)]?.answer === answer).length;
   const quizComplete = questions.length > 0 && answeredCount === questions.length;
@@ -60,7 +55,7 @@ function GeneratedQuiz({ artifact }) {
     <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white p-4">
       <div><h2 className="font-bold text-slate-900">{artifact.title}</h2><p className="text-sm text-slate-500">{questions.length} questions · {artifact.payload?.difficulty || "medium"} difficulty · answers are checked against the paper</p></div>
       <div className="rounded-full bg-primary-50 px-4 py-2 text-sm font-bold text-primary-700">Score: {score}/{questions.length} · {answeredCount}/{questions.length} answered</div>
-      <button onClick={() => setAnswers({})} disabled={!answeredCount} className="rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-600 disabled:opacity-40">Start over</button>
+      <button onClick={onRetake} disabled={regenerating} className="rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-600 disabled:opacity-40">{regenerating ? "Generating…" : "New questions"}</button>
     </div>
     {questions.map((question, questionIndex) => {
       const selectedAnswer = answers[questionIndex];
@@ -79,7 +74,7 @@ function GeneratedQuiz({ artifact }) {
       <p className="text-xs font-black uppercase tracking-wider text-primary-600">Quiz Results</p><h3 className="mt-2 text-3xl font-black text-slate-900">{score} / {questions.length} correct</h3>
       <p className="mt-1 text-lg font-bold text-primary-700">{Math.round((score / questions.length) * 100)}%</p>
       <p className="mt-2 text-slate-600">{score === questions.length ? "Excellent work — you got every question right!" : score >= questions.length * 0.7 ? "Great work — review any missed explanations to strengthen your understanding." : "Review the explanations above, then try again to improve your score."}</p>
-      <button onClick={() => setAnswers({})} className="mt-4 rounded-lg bg-primary-600 px-5 py-2.5 font-bold text-white hover:bg-primary-700">Retake quiz</button>
+      <button onClick={onRetake} disabled={regenerating} className="mt-4 rounded-lg bg-primary-600 px-5 py-2.5 font-bold text-white hover:bg-primary-700 disabled:opacity-50">{regenerating ? "Generating new questions…" : "Retake with new questions"}</button>
     </section>}
   </div>;
 }
@@ -87,13 +82,18 @@ function GeneratedQuiz({ artifact }) {
 export default function Learning() {
   const [availablePapers, setAvailablePapers] = useState([]);
   const [selectedPaperId, setSelectedPaperId] = useState("");
+  const [mindmapPrompt, setMindmapPrompt] = useState("");
   const [generatedCards, setGeneratedCards] = useState(null);
   const [generatedMindmap, setGeneratedMindmap] = useState(null);
   const [generatedMindmapArtifactId, setGeneratedMindmapArtifactId] = useState(null);
   const generatedMindmapRef = useRef(null);
   const mindmapSaveQueueRef = useRef(Promise.resolve());
   const [generatedQuiz, setGeneratedQuiz] = useState(null);
+  const [quizAnswers, setQuizAnswers] = useState({});
   const [quizNotice, setQuizNotice] = useState("");
+  const [quizRegenerating, setQuizRegenerating] = useState(false);
+  const [quizGenerationError, setQuizGenerationError] = useState("");
+  const quizRegenerationInFlightRef = useRef(false);
   const quizSectionRef = useRef(null);
   const [cardOrder, setCardOrder] = useState(() => flashcards.map((_, index) => index));
   const [cardRatings, setCardRatings] = useState({});
@@ -111,62 +111,87 @@ export default function Learning() {
   const [mindmapSearch, setMindmapSearch] = useState("");
   const [mindmapZoom, setMindmapZoom] = useState(1);
   const [mindmapPan, setMindmapPan] = useState({ x: 0, y: 0 });
+  const [tab, setTab] = useState("cards");
   const mapViewportRef = useRef(null);
   const mapStageRef = useRef(null);
   const panDragRef = useRef(null);
   useEffect(() => {
-    const cachedMindmap = readCachedMindmap();
-    if (cachedMindmap) {
-      generatedMindmapRef.current = cachedMindmap.payload;
-      setGeneratedMindmap(cachedMindmap.payload);
-      setGeneratedMindmapArtifactId(cachedMindmap.artifactId || null);
-      setSelectedMindmapNodeId("root");
-      setTab("map");
+    const cached = readLearningSession();
+    if (cached) {
+      if (cached.generatedMindmap?.nodes?.length) {
+        generatedMindmapRef.current = cached.generatedMindmap;
+        setGeneratedMindmap(cached.generatedMindmap);
+        setGeneratedMindmapArtifactId(cached.generatedMindmapArtifactId || null);
+      }
+      if (cached.generatedQuiz) setGeneratedQuiz(cached.generatedQuiz);
+      if (cached.generatedCards) setGeneratedCards(cached.generatedCards);
+      if (Array.isArray(cached.cardOrder)) setCardOrder(cached.cardOrder);
+      if (cached.cardRatings && typeof cached.cardRatings === "object") setCardRatings(cached.cardRatings);
+      if (Array.isArray(cached.retriedCards)) setRetriedCards(new Set(cached.retriedCards));
+      if (Number.isInteger(cached.cardIdx)) setCardIdx(cached.cardIdx);
+      if (typeof cached.flipped === "boolean") setFlipped(cached.flipped);
+      if (cached.quizAnswers && typeof cached.quizAnswers === "object") setQuizAnswers(cached.quizAnswers);
+      if (cached.selectedPaperId) setSelectedPaperId(cached.selectedPaperId);
+      if (typeof cached.mindmapPrompt === "string") setMindmapPrompt(cached.mindmapPrompt);
+      if (cached.selectedMindmapNodeId) setSelectedMindmapNodeId(cached.selectedMindmapNodeId);
+      if (Array.isArray(cached.collapsedMindmapNodes)) setCollapsedMindmapNodes(new Set(cached.collapsedMindmapNodes));
+      if (Number.isFinite(cached.mindmapZoom)) setMindmapZoom(cached.mindmapZoom);
+      if (cached.mindmapPan && Number.isFinite(cached.mindmapPan.x) && Number.isFinite(cached.mindmapPan.y)) setMindmapPan(cached.mindmapPan);
+      if (["cards", "quiz", "map"].includes(cached.tab)) setTab(cached.tab);
+      if (typeof cached.quizNotice === "string") setQuizNotice(cached.quizNotice);
+      if (cached.generatedQuiz && typeof performance !== "undefined" && performance.getEntriesByType("navigation")[0]?.type === "reload") {
+        regenerateQuiz(cached.generatedQuiz);
+      }
     }
     apiFetch("/papers").then(({ papers }) => {
       setAvailablePapers(papers);
-      if (papers.length) setSelectedPaperId(papers[0].id);
+      if (papers.length) setSelectedPaperId((current) => current || papers[0].id);
     }).catch((err) => setGenerationError(err.message));
-    apiFetch("/me/data").then(({ artifacts = [] }) => {
-      const lastQuiz = artifacts.find((artifact) => artifact.kind === "quiz" && Array.isArray(artifact.payload?.questions) && artifact.payload.questions.length > 0);
-      if (lastQuiz) setGeneratedQuiz(randomizeQuizOptions(lastQuiz));
-      const lastMindmap = artifacts
-        .filter((artifact) => artifact.kind === "mindmap" && Array.isArray(artifact.payload?.nodes) && artifact.payload.nodes.length > 0)
-        .sort((left, right) => new Date(right.updated_at || right.created_at).getTime() - new Date(left.updated_at || left.created_at).getTime())[0];
-      if (lastMindmap) {
-        generatedMindmapRef.current = lastMindmap.payload;
-        setGeneratedMindmap(lastMindmap.payload);
-        setGeneratedMindmapArtifactId(lastMindmap.id);
-        setSelectedMindmapNodeId("root");
-        setTab("map");
-        cacheMindmap(lastMindmap.id, lastMindmap.payload);
-        if (lastMindmap.payload?.source_paper_ids?.[0]) setSelectedPaperId(lastMindmap.payload.source_paper_ids[0]);
+  }, []);
+  async function regenerateQuiz(previousArtifact = generatedQuiz) {
+    if (quizRegenerationInFlightRef.current) return;
+    const previousQuestions = previousArtifact?.payload?.questions || [];
+    const paperId = previousArtifact?.paper_id || previousArtifact?.payload?.source_paper_ids?.[0] || selectedPaperId;
+    if (!paperId) {
+      setQuizGenerationError("Could not find the source paper for this quiz. Choose a paper and generate a quiz first.");
+      return;
+    }
+    quizRegenerationInFlightRef.current = true;
+    setQuizRegenerating(true);
+    setQuizGenerationError("");
+    setQuizNotice("Generating a fresh set of paper-based questions…");
+    try {
+      const result = await apiFetch("/learning/generate", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          kind: "quiz",
+          paper_id: paperId,
+          count: Math.max(3, Math.min(20, previousQuestions.length || 8)),
+          difficulty: previousArtifact?.payload?.difficulty || "medium",
+          avoid_questions: previousQuestions.map((question) => question.question).filter(Boolean).slice(0, 20),
+          variation_seed: Date.now().toString(36),
+        }),
+      });
+      const nextQuiz = result.artifact;
+      if (!Array.isArray(nextQuiz?.payload?.questions) || !nextQuiz.payload.questions.length) {
+        throw new Error("The model did not return usable quiz questions. Your previous quiz is still available; try again.");
       }
-    }).catch(() => {});
-  }, []);
-  useEffect(() => {
-    const key = mindmapCacheKey();
-    if (!key) return undefined;
-    const restoreOtherTabMap = (event) => {
-      if (event.key !== key || !event.newValue) return;
-      try {
-        const cached = JSON.parse(event.newValue);
-        if (!cached?.payload?.nodes?.length) return;
-        generatedMindmapRef.current = cached.payload;
-        setGeneratedMindmap(cached.payload);
-        setGeneratedMindmapArtifactId(cached.artifactId || null);
-        setSelectedMindmapNodeId("root");
-        setTab("map");
-      } catch { /* Ignore incomplete cross-tab cache updates. */ }
-    };
-    window.addEventListener("storage", restoreOtherTabMap);
-    return () => window.removeEventListener("storage", restoreOtherTabMap);
-  }, []);
+      setGeneratedQuiz(randomizeQuizOptions(nextQuiz));
+      setQuizAnswers({});
+      setQuizNotice(nextQuiz.payload?._generation_notice || `A fresh ${nextQuiz.payload?.difficulty || "medium"}-level quiz is ready with new questions.`);
+    } catch (error) {
+      setQuizGenerationError(error.message || "Could not generate new questions. Your previous quiz is still available; try again.");
+      setQuizNotice("");
+    } finally {
+      quizRegenerationInFlightRef.current = false;
+      setQuizRegenerating(false);
+    }
+  }
   const generateFromPaper = async (kind) => {
     if (!selectedPaperId) { setGenerationError("Upload a paper first, then choose it here."); return; }
     setGenerating(true); setGenerationError(""); setGenerationMode(""); setGenerationNotice("");
     try {
-      const result = await apiFetch("/learning/generate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind, paper_id: selectedPaperId, count: kind === "mindmap" ? 6 : 8 }) });
+      const result = await apiFetch("/learning/generate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind, paper_id: selectedPaperId, count: kind === "mindmap" ? 6 : 8, prompt: kind === "mindmap" ? mindmapPrompt.trim() : "" }) });
       const payload = result.artifact.payload || {};
       setGenerationMode(payload._generation_mode || "");
       setGenerationNotice(payload._generation_notice || "");
@@ -182,7 +207,6 @@ export default function Learning() {
         generatedMindmapRef.current = payload;
         setGeneratedMindmap(payload);
         setGeneratedMindmapArtifactId(result.artifact.id);
-        cacheMindmap(result.artifact.id, payload);
         setSelectedMindmapNodeId("root");
         setCollapsedMindmapNodes(new Set());
         setMindmapZoom(1);
@@ -193,12 +217,21 @@ export default function Learning() {
     } catch (err) { setGenerationError(err.message); }
     finally { setGenerating(false); }
   };
-  const [tab, setTab] = useState("cards");
   useEffect(() => {
     if (generatedQuiz && tab === "quiz") quizSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   }, [generatedQuiz, tab]);
   const [cardIdx, setCardIdx] = useState(0);
   const [flipped, setFlipped] = useState(false);
+  useEffect(() => {
+    writeLearningSession({
+      tab, selectedPaperId, mindmapPrompt, generatedMindmap, generatedMindmapArtifactId,
+      selectedMindmapNodeId, collapsedMindmapNodes: [...collapsedMindmapNodes], mindmapZoom, mindmapPan,
+      generatedQuiz, quizAnswers, quizNotice, generatedCards, cardOrder, cardRatings,
+      retriedCards: [...retriedCards], cardIdx, flipped,
+    });
+  }, [tab, selectedPaperId, generatedMindmap, generatedMindmapArtifactId, selectedMindmapNodeId,
+    collapsedMindmapNodes, mindmapZoom, mindmapPan, mindmapPrompt, generatedQuiz, quizAnswers, quizNotice,
+    generatedCards, cardOrder, cardRatings, retriedCards, cardIdx, flipped]);
 
   const demoMindmapNodes = [
     { id: "center", label: "Transformer", x: 50, y: 50, color: "from-primary-500 to-accent-500", size: "lg" },
@@ -384,7 +417,7 @@ export default function Learning() {
           node_id: nodeId,
           node_label: parent.label,
           breadcrumb: ancestors,
-          context: [parent.summary, parent.details, parent.evidence].filter(Boolean).join("\n").slice(0, 1600),
+          context: [mindmapPrompt.trim() ? `Map direction: ${mindmapPrompt.trim()}` : "", parent.summary, parent.details, parent.evidence].filter(Boolean).join("\n").slice(0, 1600),
           existing_nodes: mindmapNodes.map(({ id, label }) => ({ id, label })),
         }),
       });
@@ -403,7 +436,6 @@ export default function Learning() {
       };
       generatedMindmapRef.current = updatedMap;
       setGeneratedMindmap(updatedMap);
-      cacheMindmap(generatedMindmapArtifactId, updatedMap);
       setPendingMindmapFocusId(nodeId);
       setCollapsedMindmapNodes((current) => { const next = new Set(current); next.delete(nodeId); return next; });
       setMindmapNotice(`Added ${newChildren.length} source-grounded concepts under ${parent.label}.`);
@@ -489,6 +521,11 @@ export default function Learning() {
         <select id="study-paper" value={selectedPaperId} onChange={(e) => setSelectedPaperId(e.target.value)} className="min-w-64 rounded-lg border border-slate-200 px-3 py-2 text-sm" disabled={!availablePapers.length}>
           {availablePapers.length ? availablePapers.map((paper) => <option key={paper.id} value={paper.id}>{paper.filename}</option>) : <option value="">No uploaded papers</option>}
         </select>
+        <div className="w-full space-y-1.5">
+          <label htmlFor="mindmap-prompt" className="block text-sm font-semibold text-slate-700">Mind map prompt <span className="font-normal text-slate-400">(optional)</span></label>
+          <textarea id="mindmap-prompt" value={mindmapPrompt} onChange={(event) => setMindmapPrompt(event.target.value)} maxLength={1000} rows={3} placeholder="Tell ScholarMind how to organize the map—for example, focus on the research problem, methods, results, and limitations." className="w-full resize-y rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700 outline-none transition placeholder:text-slate-400 focus:border-primary-400 focus:ring-2 focus:ring-primary-100" />
+          <p className="text-xs text-slate-500">The map will stay grounded in the selected paper. {mindmapPrompt.length}/1000</p>
+        </div>
         <button onClick={() => generateFromPaper("flashcards")} disabled={generating || !selectedPaperId} className="rounded-lg bg-primary-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">{generating ? "Generating…" : "Generate flashcards"}</button>
         <button onClick={() => generateFromPaper("mindmap")} disabled={generating || !selectedPaperId} className="rounded-lg border border-primary-200 px-4 py-2 text-sm font-semibold text-primary-700 disabled:opacity-50">Generate mind map</button>
         {generationError && <p className="w-full text-sm text-red-600">{generationError}</p>}
@@ -496,8 +533,9 @@ export default function Learning() {
         {generationMode === "ai" && <p className="w-full text-sm font-medium text-emerald-700">AI-generated from the selected PDF.</p>}
       </div>
 
-      <ArtifactGenerator kinds={["quiz", "visualization"]} heading="Generate a source-based quiz or visualization outline" onQuizGenerated={(artifact) => { setGeneratedQuiz(randomizeQuizOptions(artifact)); setQuizNotice(`Your ${artifact.payload?.difficulty || "medium"} quiz is ready below.`); setTab("quiz"); }} />
+      <ArtifactGenerator kinds={["quiz", "visualization"]} heading="Generate a source-based quiz or visualization outline" onQuizGenerated={(artifact) => { setGeneratedQuiz(randomizeQuizOptions(artifact)); setQuizAnswers({}); setQuizNotice(artifact.payload?._generation_notice || `Your ${artifact.payload?.difficulty || "medium"} quiz is ready below.`); setTab("quiz"); }} />
       {quizNotice && <p role="status" className="-mt-4 rounded-lg bg-emerald-50 px-4 py-2 text-sm font-medium text-emerald-800">{quizNotice}</p>}
+      {quizGenerationError && <p role="alert" className="-mt-4 rounded-lg bg-red-50 px-4 py-2 text-sm font-medium text-red-800">{quizGenerationError} {generatedQuiz && <button onClick={() => regenerateQuiz()} className="ml-1 font-bold underline">Try again</button>}</p>}
 
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
         {[
@@ -586,7 +624,7 @@ export default function Learning() {
         </div>
       )}
 
-      {tab === "quiz" && <div ref={quizSectionRef} className="scroll-mt-6"><GeneratedQuiz artifact={generatedQuiz} /></div>}
+      {tab === "quiz" && <div ref={quizSectionRef} className="scroll-mt-6"><GeneratedQuiz artifact={generatedQuiz} answers={quizAnswers} setAnswers={setQuizAnswers} onRetake={() => regenerateQuiz()} regenerating={quizRegenerating} /></div>}
 
       {tab === "map" && (
         <div className="rounded-2xl border border-slate-200 bg-gradient-to-br from-white via-slate-50 to-primary-50/30 overflow-hidden">

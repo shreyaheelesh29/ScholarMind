@@ -6,6 +6,7 @@ import logging
 import os
 import random
 import re
+from difflib import SequenceMatcher
 import socket
 import threading
 import time
@@ -13,6 +14,7 @@ import unicodedata
 import uuid
 import urllib.error
 import urllib.request
+from collections import Counter
 from functools import lru_cache
 from typing import Any
 from urllib.parse import urlparse
@@ -663,7 +665,8 @@ def answer(question: str, hits: list[dict[str, Any]], history: list[dict[str, st
 
 
 def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], count: int = 8,
-                            difficulty: str = "medium") -> dict[str, Any]:
+                            difficulty: str = "medium",
+                            avoid_questions: list[str] | None = None) -> dict[str, Any]:
     """Generate a structured learning/research artifact grounded in retrieved passages."""
     if not hits:
         raise ValueError("No relevant paper passages were found. Try a more specific topic or re-upload the PDF.")
@@ -695,6 +698,12 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
 
     api_key = os.getenv("LLM_API_KEY")
     if not api_key:
+        if kind == "quiz":
+            fallback_questions = _extractive_quiz(hits, count, difficulty, avoid_questions or [])
+            if fallback_questions:
+                return {"questions": fallback_questions, "difficulty": difficulty,
+                        "_generation_mode": "source_fallback",
+                        "_generation_notice": "The AI model was unavailable, so these questions were built from exact statements in the selected PDF."}
         fallback_data["_generation_mode"] = "source_fallback"
         fallback_data["_generation_notice"] = ("AI generation is not configured. No quiz, flashcards, or mind map were fabricated; configure an AI provider and generate again."
             if kind in {"quiz", "flashcards", "mindmap"} else "AI generation is not configured. This is extracted source material, not a generated " + kind.replace("_", " ") + ".")
@@ -729,7 +738,14 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
                                   else f"Generate up to {generation_count} useful items. ")
         evidence_instruction = ("Every quiz question must be answerable from the supplied passages. "
                                 if kind == "quiz" else "If evidence is insufficient, omit the item. ")
-        shared = (f"Use only the paper passages below. Focus requested: {prompt}. {item_count_instruction}"
+        previous_questions = [re.sub(r"\s+", " ", item).strip()[:240]
+                              for item in (avoid_questions or []) if isinstance(item, str) and item.strip()]
+        avoid_instruction = (
+            "Do not repeat or lightly rephrase any earlier question, and test different facts or concepts. Earlier questions:\n"
+            + "\n".join(f"- {question}" for question in previous_questions) + "\n"
+            if kind == "quiz" and previous_questions else ""
+        )
+        shared = (f"Use only the paper passages below. Focus requested: {prompt}. {item_count_instruction}{avoid_instruction}"
                   "Each page must be one of the page numbers shown in the sources. " + evidence_instruction +
                   "Do not copy a passage verbatim as a question; paraphrase and test understanding. Return JSON only, with no markdown.")
     analysis_kinds = {"comparison", "literature_review", "research_gap", "research_ideas"}
@@ -747,9 +763,9 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
         "research_ideas": "Propose feasible candidate ideas motivated by the supplied paper evidence and stated gaps. Clearly label them as proposals, not proven novel contributions. Include a testable question, method, evaluation, risks, and source IDs such as S1. Do not invent datasets or results.",
     }
     difficulty_guidance = {
-        "simple": "Test direct recall of clearly stated definitions, terms, and facts. Use straightforward wording and avoid multi-step reasoning.",
-        "medium": "Test understanding and application of the paper's concepts, methods, and findings. Require a small inference while keeping the answer directly supported by the passages.",
-        "hard": "Test deeper analysis by asking the learner to connect concepts, compare methods or findings, or infer implications. Require careful reasoning, but keep every correct answer fully supported by the passages.",
+        "simple": "Test direct recall of clearly stated definitions, terms, and facts. Use straightforward wording; do not require inference, calculation, or comparison.",
+        "medium": "Test understanding and application of the paper's concepts, methods, and findings. Require one reasoning step, such as interpreting a result or applying a method to its described purpose.",
+        "hard": "Test multi-step analysis, not simple recall. Require the learner to connect two paper-supported ideas, compare methods or findings, or infer an implication or limitation. Keep every correct answer fully supported by the passages.",
     }
     difficulty_instruction = f" Difficulty: {difficulty}. {difficulty_guidance.get(difficulty, difficulty_guidance['medium'])}" if kind == "quiz" else ""
     instruction = f"{shared} {task_instructions.get(kind, 'Create concise, useful study material grounded in the sources.')}{difficulty_instruction} Match this structure: {shape}"
@@ -764,7 +780,7 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
         # Give requested quiz counts enough output room; the previous fixed
         # 480-token budget plus a three-question cap caused short quizzes.
         generation_tokens.update({"flashcards": 320, "mindmap": 450,
-                                  "quiz": min(6000, max(1400, generation_count * 300))})
+                                  "quiz": min(5000, max(1200, generation_count * 220))})
     elif kind == "quiz":
         generation_tokens["quiz"] = min(8192, max(1400, generation_count * 400))
     compact_context_kind = kind in {"flashcards", "mindmap", "quiz", "visualization", "viva"}
@@ -774,7 +790,7 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
         context_chars = 1300 if compact_context_kind else 1800
     analysis_context_chars = 500 if local_ollama and kind == "research_gap" else 1800
     quiz_timeout = max(120, generation_count * 15) if local_ollama and kind == "quiz" else (120 if local_ollama else 45)
-    quiz_context_window = max(2048, generation_tokens["quiz"] + 2200) if local_ollama and kind == "quiz" else None
+    quiz_context_window = max(2048, generation_tokens["quiz"] + 1600) if local_ollama and kind == "quiz" else None
     messages = [
             {"role": "system", "content": "You are a precise academic learning assistant. Use only supplied source passages and return valid JSON."},
             {"role": "user", "content": f"{instruction}\n\nSOURCES:\n{_analysis_context(source_hits, max_chars=analysis_context_chars) if kind in analysis_kinds else _context(source_hits, max_chars=context_chars)}" + ("\n\nVERIFIED GAP EVIDENCE OPTIONS (choose evidence_id only; the backend attaches exact quotes and citations):\n" + "\n".join(f"{option['evidence_id']} [{option['source_id']}] {option['signal']}: {option['evidence']}" for option in gap_evidence_options) if kind == "research_gap" else "")}
@@ -783,6 +799,7 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
         content = _chat_request(base_url, model, messages,
             timeout=quiz_timeout,
             max_tokens=generation_tokens.get(kind, 1600),
+            temperature=0.45 if kind == "quiz" else 0.2,
             json_mode=kind != "mindmap",
             json_schema=_mindmap_schema() if kind == "mindmap" and local_ollama else None,
             attempts=1, context_window=quiz_context_window)
@@ -819,6 +836,8 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
                 return result
         try:
             _validate_study_artifact(kind, result, source_hits, expected_count=generation_count if kind == "quiz" else None)
+            if kind == "quiz" and _repeated_quiz_questions(result.get("questions", []), avoid_questions or []):
+                raise ValueError("Quiz repeats a question from the previous attempt")
         except ValueError as validation_error:
             if kind != "quiz":
                 raise
@@ -826,7 +845,9 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
                 messages[0],
                 {"role": "user", "content": (
                     f"Repair this quiz JSON. Validation failed: {validation_error}. Return exactly {generation_count} distinct {difficulty}-difficulty questions. Do not return fewer. "
-                    "Return the same JSON shape with exactly four distinct, plausible options per question, "
+                    "Check every question against every other question in the quiz and replace any duplicate with a question about a different paper fact or concept. "
+                    + ("Do not repeat or lightly rephrase any earlier question; replace repeated concepts with different paper-supported concepts. Earlier questions:\n" + "\n".join(f"- {question}" for question in previous_questions) + "\n" if previous_questions else "")
+                    + "Return the same JSON shape with exactly four distinct, plausible options per question, "
                     "exactly one correct answer, and answer as the correct option's zero-based index. "
                     "Preserve the intended correct answer and stay faithful to the supplied passages. "
                     "Use only supplied page numbers. Return JSON only.\n\n"
@@ -845,6 +866,30 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
                 raise ValueError("The model did not return a corrected quiz JSON object")
             result = json.loads(repaired_content[repair_start:repair_end + 1])
             _validate_study_artifact(kind, result, source_hits, expected_count=generation_count if kind == "quiz" else None)
+            if _repeated_quiz_questions(result.get("questions", []), avoid_questions or []):
+                failed_questions = [item.get("question", "") for item in result.get("questions", []) if isinstance(item, dict)]
+                excluded_questions = list(dict.fromkeys([*previous_questions, *failed_questions]))
+                retry_messages = [messages[0], {"role": "user", "content": (
+                    f"Create a completely new quiz with exactly {generation_count} {difficulty}-difficulty questions. "
+                    "Use different paper facts and concepts; do not reuse or paraphrase any question in the exclusion list. "
+                    "Ensure all questions are supported by SOURCES and have four distinct options, one correct zero-based answer, an explanation, and a valid source page. Return JSON only.\n\n"
+                    "EXCLUSION LIST:\n" + "\n".join(f"- {question}" for question in excluded_questions) +
+                    f"\n\nREQUIRED SHAPE:\n{shape}\n\nSOURCES:\n{_context(source_hits, max_chars=context_chars)}"
+                )}]
+                retry_content = _chat_request(base_url, model, retry_messages,
+                    timeout=quiz_timeout,
+                    max_tokens=generation_tokens.get(kind, 1600),
+                    temperature=0.7, json_mode=True, attempts=1, context_window=quiz_context_window)
+                if not isinstance(retry_content, str) or not retry_content.strip():
+                    raise ValueError("The model could not create a fresh quiz. Try again.")
+                retry_content = retry_content.strip()
+                retry_start, retry_end = retry_content.find("{"), retry_content.rfind("}")
+                if retry_start < 0 or retry_end < retry_start:
+                    raise ValueError("The model did not return a fresh quiz JSON object. Try again.")
+                result = json.loads(retry_content[retry_start:retry_end + 1])
+                _validate_study_artifact(kind, result, source_hits, expected_count=generation_count)
+                if _repeated_quiz_questions(result.get("questions", []), avoid_questions or []):
+                    raise ValueError("The model repeatedly reused questions from the prior quiz. Try a different focus or retry.")
         if kind == "quiz":
             for question in result["questions"]:
                 correct_option = question["options"][question["answer"]]
@@ -855,6 +900,13 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
         return result
     except Exception as exc:
         # A model/provider response must not prevent source-based study material from being saved.
+        if kind == "quiz":
+            logger.warning("AI quiz generation failed (%s); building questions from retrieved paper text.", exc)
+            fallback_questions = _extractive_quiz(hits, count, difficulty, avoid_questions or [])
+            if fallback_questions:
+                return {"questions": fallback_questions, "difficulty": difficulty,
+                        "_generation_mode": "source_fallback",
+                        "_generation_notice": "The AI model could not produce a valid quiz, so these questions were built from exact statements in the selected PDF."}
         if kind == "research_gap":
             logger.warning("LLM research-gap output failed validation (%s); reviewing retrieved passages instead.", exc)
             extracted_gaps = _extract_explicit_research_gaps(hits, min(count, 4))
@@ -1011,6 +1063,138 @@ def _attach_mindmap_evidence(result: Any, hits: list[dict[str, Any]]) -> None:
             raise ValueError(f'Mind map concept "{label[:80]}" has no sentence long enough to cite')
         node["page"] = int(hit["page_number"])
         node["evidence"] = quote
+
+
+def _quiz_question_similarity(left: str, right: str) -> float:
+    """Compare the meaningful subject words, not generic quiz phrasing."""
+    ignored = {"a", "an", "and", "are", "as", "at", "based", "be", "by", "can", "does", "for", "from", "how", "in", "is", "it", "of", "on", "paper", "the", "their", "this", "to", "was", "what", "when", "which", "why", "with"}
+    normalize = lambda text: " ".join(word for word in re.findall(r"[a-z0-9]+", str(text).casefold()) if word not in ignored)
+    left_norm, right_norm = normalize(left), normalize(right)
+    if not left_norm or not right_norm:
+        return 0.0
+    left_words, right_words = set(left_norm.split()), set(right_norm.split())
+    overlap = len(left_words & right_words) / max(1, len(left_words | right_words))
+    return max(SequenceMatcher(None, left_norm, right_norm).ratio(), overlap)
+
+
+def _extractive_quiz(hits: list[dict[str, Any]], count: int, difficulty: str,
+                     previous_questions: list[str]) -> list[dict[str, Any]]:
+    """Build source-verifiable cloze questions when the configured LLM fails validation."""
+    stop_words = {
+        "about", "after", "again", "also", "among", "because", "been", "being", "between", "both",
+        "could", "does", "during", "each", "from", "have", "into", "more", "most", "other", "over",
+        "paper", "same", "such", "than", "that", "their", "there", "these", "they", "this", "those",
+        "through", "under", "using", "very", "what", "when", "where", "which", "while", "with", "would",
+    }
+    token_pattern = re.compile(r"\b[A-Za-z][A-Za-z0-9-]{3,}\b")
+    sentences: list[tuple[dict[str, Any], str]] = []
+    term_counts: Counter[str] = Counter()
+    display_terms: dict[str, str] = {}
+    sentences_by_page: dict[int, list[str]] = {}
+    for hit in hits:
+        text = re.sub(r"\s+", " ", str(hit.get("content", ""))).strip()
+        for sentence in re.split(r"(?<=[.!?])\s+|\n+", text):
+            sentence = sentence.strip(" \t\r\n-•")
+            if not 45 <= len(sentence) <= 520:
+                continue
+            sentences.append((hit, sentence))
+            page = int(hit.get("page_number", 0) or 0)
+            sentences_by_page.setdefault(page, []).append(sentence)
+            for match in token_pattern.finditer(sentence):
+                token = match.group(0)
+                key = token.casefold()
+                if key not in stop_words and len(key) >= 5:
+                    term_counts[key] += 1
+                    display_terms.setdefault(key, token)
+
+    distractors = [word for word in display_terms if term_counts[word] <= max(12, len(sentences) // 3)]
+    if len(distractors) < 4:
+        distractors = list(display_terms)
+    if len(distractors) < 4:
+        return []
+
+    generated: list[dict[str, Any]] = []
+    seen_sentences: set[str] = set()
+    seen_pages: Counter[int] = Counter()
+    prior = [str(question) for question in previous_questions if isinstance(question, str) and question.strip()]
+    # Simple questions use shorter, direct statements; higher levels prefer
+    # richer context that supports interpretation or connecting two statements.
+    sentences.sort(key=lambda pair: len(pair[1]), reverse=(difficulty != "simple"))
+    for hit, sentence in sentences:
+        normalized_sentence = re.sub(r"\W+", " ", sentence).strip().casefold()
+        if normalized_sentence in seen_sentences:
+            continue
+        page = int(hit.get("page_number", 0) or 0)
+        if page and seen_pages[page] >= 3:
+            continue
+        matches = [match for match in token_pattern.finditer(sentence)
+                   if match.group(0).casefold() not in stop_words and len(match.group(0)) >= 5]
+        if not matches:
+            continue
+        # Pick the least common useful term in this sentence for a clean blank.
+        matches.sort(key=lambda match: (term_counts[match.group(0).casefold()], -len(match.group(0))))
+        chosen = None
+        for match in matches:
+            answer = match.group(0)
+            key = answer.casefold()
+            distractor_pool = [term for term in distractors if term != key]
+            if len(distractor_pool) >= 3:
+                chosen = (match, answer, distractor_pool)
+                break
+        if not chosen:
+            continue
+        match, answer, distractor_pool = chosen
+        masked = sentence[:match.start()] + "_____" + sentence[match.end():]
+        if difficulty == "simple":
+            question_text = f"According to the paper, which term completes this statement? “{masked}”"
+        elif difficulty == "hard":
+            answer_key = answer.casefold()
+            sentence_terms = {word.casefold() for word in token_pattern.findall(sentence)}
+            related_sentence = next((other for other in sentences_by_page.get(page, [])
+                if other != sentence and len(sentence_terms & {word.casefold() for word in token_pattern.findall(other)}) >= 2
+                and answer_key not in {word.casefold() for word in token_pattern.findall(other)}), None)
+            if related_sentence:
+                question_text = (
+                    "Read both related statements from the paper. Which term completes the second statement? "
+                    f"First: “{related_sentence}” Second: “{masked}”"
+                )
+            else:
+                question_text = f"Considering the paper's discussion of this concept, which term best completes the statement? “{masked}”"
+        else:
+            question_text = f"In the context of the paper's method or findings, which term best completes this statement? “{masked}”"
+        if any(_quiz_question_similarity(question_text, old) >= 0.9 for old in prior):
+            continue
+        if any(_quiz_question_similarity(question_text, item["question"]) >= 0.98 for item in generated):
+            continue
+        choices = random.sample(distractor_pool, 3)
+        options = [answer, *(display_terms[item] for item in choices)]
+        random.shuffle(options)
+        generated.append({
+            "question": question_text,
+            "options": options,
+            "answer": options.index(answer),
+            "explanation": f"The selected paper states: {sentence}",
+            "page": page,
+        })
+        seen_sentences.add(normalized_sentence)
+        if page:
+            seen_pages[page] += 1
+        if len(generated) >= min(20, count):
+            break
+    return generated
+
+
+def _repeated_quiz_questions(questions: list[dict[str, Any]], previous: list[str]) -> bool:
+    """Detect exact or near repeats from an earlier quiz attempt."""
+    prior = [str(question) for question in previous if isinstance(question, str) and question.strip()]
+    for item in questions:
+        question = str(item.get("question", "")) if isinstance(item, dict) else ""
+        # Only compare with earlier attempts. The model is allowed to ask
+        # different questions about the same concept in one quiz; comparing
+        # those to each other made fresh quiz generation fail unnecessarily.
+        if any(_quiz_question_similarity(question, old) >= 0.9 for old in prior):
+            return True
+    return False
 
 
 def _validate_study_artifact(kind: str, result: Any, hits: list[dict[str, Any]], expected_count: int | None = None) -> None:

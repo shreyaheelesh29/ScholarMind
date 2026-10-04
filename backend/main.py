@@ -64,8 +64,41 @@ class GenerateRequest(BaseModel):
     paper_id: str | None = None
     paper_ids: list[str] | None = Field(default=None, max_length=10)
     prompt: str = Field(default="", max_length=1000)
+    avoid_questions: list[str] = Field(default_factory=list, max_length=20)
+    variation_seed: str = Field(default="", max_length=40)
     count: int = Field(default=6, ge=1, le=20)
     difficulty: str = Field(default="medium", pattern="^(simple|medium|hard)$")
+
+
+def _prefer_unseen_quiz_passages(hits: list[dict[str, Any]], previous_questions: list[str], limit: int) -> list[dict[str, Any]]:
+    """Select relevant passages that cover concepts not tested by the last quiz."""
+    ignored = {"about", "after", "also", "are", "because", "between", "both", "can", "does", "during", "each", "from", "have", "into", "more", "most", "paper", "should", "than", "that", "their", "then", "there", "these", "they", "this", "through", "under", "using", "what", "when", "where", "which", "while", "with", "would"}
+    tokenize = lambda text: {word for word in re.findall(r"[a-z0-9]+", str(text).casefold()) if len(word) > 2 and word not in ignored}
+    tested_terms = set().union(*(tokenize(question) for question in previous_questions if question.strip())) if previous_questions else set()
+    if not tested_terms:
+        return hits[:limit]
+
+    ranked = []
+    for hit in hits:
+        passage_terms = tokenize(hit.get("content", ""))
+        overlap = len(passage_terms & tested_terms) / max(1, len(passage_terms))
+        ranked.append((overlap, -float(hit.get("score", 0.0) or 0.0), hit))
+    ranked.sort(key=lambda item: (item[0], item[1]))
+
+    # Keep some page diversity so one long page does not crowd out other topics.
+    selected: list[dict[str, Any]] = []
+    page_counts: dict[int, int] = {}
+    deferred: list[dict[str, Any]] = []
+    for _, _, hit in ranked:
+        page = int(hit.get("page_number", 0) or 0)
+        if page_counts.get(page, 0) >= 2:
+            deferred.append(hit)
+            continue
+        selected.append(hit)
+        page_counts[page] = page_counts.get(page, 0) + 1
+        if len(selected) >= limit:
+            return selected
+    return (selected + deferred)[:limit]
 
 
 class ArtifactUpdate(BaseModel):
@@ -559,8 +592,14 @@ def generate_learning(payload: GenerateRequest, user: dict[str, Any] = Depends(c
         for selected_id in paper_ids:
             hits.extend(hybrid_search(retrieval_query, query_embedding, [selected_id], per_paper_limit, owner_id=user["id"]))
     else:
-        retrieval_limit = min(payload.count, 20 if payload.kind == "quiz" else 10)
+        # A retake needs a broader candidate pool so it can draw on paper
+        # passages beyond the same highest-ranked chunks as the last quiz.
+        retrieval_limit = min(80, max(40, payload.count * 5)) if payload.kind == "quiz" else min(payload.count, 10)
         hits = hybrid_search(retrieval_query, query_embedding, paper_ids, retrieval_limit, owner_id=user["id"])
+        if payload.kind == "quiz" and payload.avoid_questions:
+            hits = _prefer_unseen_quiz_passages(
+                hits, payload.avoid_questions, max(10, min(20, payload.count * 2)),
+            )
     if not hits:
         if payload.kind != "research_gap":
             raise HTTPException(status_code=404, detail="No text passages found for this paper")
@@ -575,11 +614,19 @@ def generate_learning(payload: GenerateRequest, user: dict[str, Any] = Depends(c
                                  {**content, "citations": [], "source_paper_ids": paper_ids}, paper_ids[0])
         record_activity(user["id"], f"generated_{payload.kind}", {"artifact_id": artifact["id"], "paper_ids": paper_ids})
         return {"artifact": artifact}
+    generation_prompt = query
+    if payload.kind == "quiz" and payload.variation_seed:
+        generation_prompt += f"\nUse this variation key to choose a different coverage mix: {payload.variation_seed}."
     try:
-        content = generate_study_artifact(payload.kind, query, hits, payload.count, payload.difficulty)
+        content = generate_study_artifact(
+            payload.kind, generation_prompt, hits, payload.count, payload.difficulty,
+            avoid_questions=payload.avoid_questions if payload.kind == "quiz" else None,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    if content.get("_generation_mode") == "source_fallback":
+    if content.get("_generation_mode") == "source_fallback" and not (
+        payload.kind == "quiz" and isinstance(content.get("questions"), list) and content["questions"]
+    ):
         raise HTTPException(status_code=503, detail=content.get("_generation_notice", "AI generation failed. Please try again."))
     kind_title = payload.kind.replace("_", " ").title()
     artifact_title = (f"{kind_title}: {focus}" if focus else f"{kind_title} from {paper_names}")[:200]
