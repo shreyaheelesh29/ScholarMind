@@ -35,7 +35,6 @@ def extract_pdf(file_path: Path) -> dict[str, Any]:
     with pymupdf.open(file_path) as document:
         for page_number, page in enumerate(document, start=1):
             text = page.get_text("text").strip()
-            text = pytesseract.image_to_string(image).strip()
             # OCR fallback for scanned/image-only PDF pages
             if not text:
                 pix = page.get_pixmap()
@@ -110,18 +109,31 @@ def extract_pptx(file_path: Path) -> dict[str, Any]:
 
     slides = []
 
+    def collect_shape_text(shapes) -> list[str]:
+        collected = []
+        for shape in shapes:
+            # Grouped objects and tables often hold slide text that is not
+            # exposed through the ordinary shape.text property.
+            nested_shapes = getattr(shape, "shapes", None)
+            if nested_shapes is not None:
+                collected.extend(collect_shape_text(nested_shapes))
+            if getattr(shape, "has_table", False):
+                for row in shape.table.rows:
+                    for cell in row.cells:
+                        value = cell.text.strip()
+                        if value:
+                            collected.append(value)
+            elif hasattr(shape, "text"):
+                value = shape.text.strip()
+                if value:
+                    collected.append(value)
+        return collected
+
     for slide_number, slide in enumerate(
         presentation.slides,
         start=1,
     ):
-        slide_text = []
-
-        for shape in slide.shapes:
-            if hasattr(shape, "text"):
-                text = shape.text.strip()
-
-                if text:
-                    slide_text.append(text)
+        slide_text = collect_shape_text(slide.shapes)
 
         combined_text = "\n".join(slide_text).strip()
 

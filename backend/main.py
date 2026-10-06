@@ -27,7 +27,7 @@ from database import (create_user, find_user_by_email, get_paper, get_user, hybr
                       save_paper_annotation, delete_paper_annotation,
                       save_chat_message, save_chunks, save_paper_if_unique, sync_admin_emails,
                       find_duplicate_paper)
-from rag import answer, citations_for, embed, embed_query, generate_study_artifact
+from rag import answer, citations_for, embed, embed_query, expand_mindmap_node, generate_study_artifact
 from document_processor import extract_text
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -75,6 +75,47 @@ class GenerateRequest(BaseModel):
     paper_ids: list[str] | None = Field(default=None, max_length=10)
     prompt: str = Field(default="", max_length=1000)
     count: int = Field(default=6, ge=1, le=20)
+    difficulty: str = Field(default="medium", pattern="^(simple|medium|hard)$")
+
+
+class MindMapExistingNode(BaseModel):
+    id: str = Field(min_length=1, max_length=120)
+    label: str = Field(min_length=1, max_length=180)
+
+
+class MindMapExpansionRequest(BaseModel):
+    paper_id: str
+    node_id: str = Field(min_length=1, max_length=120)
+    node_label: str = Field(min_length=2, max_length=180)
+    breadcrumb: list[str] = Field(default_factory=list, max_length=12)
+    context: str = Field(default="", max_length=1600)
+    existing_nodes: list[MindMapExistingNode] = Field(default_factory=list, max_length=250)
+
+
+class MindMapExpansionNode(BaseModel):
+    id: str = Field(min_length=1, max_length=120)
+    label: str = Field(min_length=2, max_length=100)
+    summary: str = Field(min_length=20, max_length=500)
+    details: str = Field(min_length=30, max_length=1200)
+    example: str = Field(default="", max_length=500)
+    key_points: list[str] = Field(default_factory=list, max_length=4)
+    related_concepts: list[str] = Field(default_factory=list, max_length=4)
+    importance: bool = False
+    page: int = Field(ge=1)
+    evidence: str = Field(min_length=20, max_length=180)
+
+
+class MindMapExpansionEdge(BaseModel):
+    source: str = Field(min_length=1, max_length=120)
+    target: str = Field(min_length=1, max_length=120)
+    label: str = Field(min_length=2, max_length=80)
+
+
+class MindMapExpansionResponse(BaseModel):
+    parent_id: str
+    children: list[MindMapExpansionNode]
+    edges: list[MindMapExpansionEdge]
+    generation_mode: str = "ai"
 
 
 class ArtifactUpdate(BaseModel):
@@ -624,11 +665,12 @@ def generate_learning(payload: GenerateRequest, user: dict[str, Any] = Depends(c
         for selected_id in paper_ids:
             hits.extend(hybrid_search(query, query_embedding, [selected_id], per_paper_limit, owner_id=user["id"]))
     else:
-        hits = hybrid_search(query, query_embedding, paper_ids, min(payload.count, 10), owner_id=user["id"])
+        retrieval_limit = min(payload.count * 2, 20) if payload.kind == "quiz" else min(payload.count, 10)
+        hits = hybrid_search(query, query_embedding, paper_ids, retrieval_limit, owner_id=user["id"])
     if not hits:
         raise HTTPException(status_code=404, detail="No text passages found for this paper")
     try:
-        content = generate_study_artifact(payload.kind, query, hits, payload.count)
+        content = generate_study_artifact(payload.kind, query, hits, payload.count, payload.difficulty)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     if content.get("_generation_mode") == "source_fallback":
@@ -638,6 +680,30 @@ def generate_learning(payload: GenerateRequest, user: dict[str, Any] = Depends(c
     artifact = save_artifact(user["id"], payload.kind, artifact_title, {**content, "citations": citations_for(hits), "source_paper_ids": paper_ids}, paper_ids[0])
     record_activity(user["id"], f"generated_{payload.kind}", {"artifact_id": artifact["id"], "paper_ids": paper_ids})
     return {"artifact": artifact}
+
+
+@app.post("/api/learning/mindmap/expand", response_model=MindMapExpansionResponse)
+def expand_learning_mindmap(payload: MindMapExpansionRequest, user: dict[str, Any] = Depends(current_user)):
+    owned_paper(payload.paper_id, user)
+    existing_nodes = [node.model_dump() for node in payload.existing_nodes]
+    if not any(node["id"] == payload.node_id for node in existing_nodes):
+        raise HTTPException(status_code=422, detail="The selected concept is not part of this mind map")
+
+    retrieval_query = " ".join([
+        payload.node_label,
+        *payload.breadcrumb[-6:],
+        payload.context[:700],
+        "definition mechanism key details examples advantages limitations applications relationships",
+    ])
+    hits = hybrid_search(retrieval_query, embed_query(retrieval_query), [payload.paper_id], 12, owner_id=user["id"])
+    if not hits:
+        raise HTTPException(status_code=404, detail="No paper passages found for this concept")
+    try:
+        return expand_mindmap_node(
+            payload.node_id, payload.node_label, payload.breadcrumb, payload.context, existing_nodes, hits,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @app.patch("/api/artifacts/{artifact_id}")

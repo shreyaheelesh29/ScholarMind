@@ -22,4 +22,6 @@ PDF uploads are fingerprinted with SHA-256. Uploading an identical file again in
 4. Run `uvicorn main:app --reload --port 8000` from this directory.
 5. Run `npm run dev` in the application root. Vite proxies `/api` to the backend.
 
+On Windows, you can run `./start.ps1` from the `backend` directory instead. It selects a virtual environment that can import the required backend packages, avoiding stale environments that point to a removed Python installation.
+
 Use `http://localhost:8000/docs` to inspect endpoints. Media transcription/audio-video generation and actual `.pptx` file export are not included yet; PPT generation currently stores a structured outline with speaker notes.

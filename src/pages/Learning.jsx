@@ -1,6 +1,24 @@
-import { useEffect, useState } from "react";
-import { apiFetch } from "../api";
+import { useEffect, useRef, useState } from "react";
+import { Link } from "react-router-dom";
+import { apiFetch, getSessionUser } from "../api";
 import ArtifactGenerator from "../components/research/ArtifactGenerator";
+
+function learningSessionKey() {
+  const userId = getSessionUser()?.id;
+  return userId ? `scholarmind_learning_session_${userId}` : null;
+}
+
+function readLearningSession() {
+  const key = learningSessionKey();
+  if (!key) return null;
+  try { return JSON.parse(sessionStorage.getItem(key) || "null"); } catch { return null; }
+}
+
+function writeLearningSession(snapshot) {
+  const key = learningSessionKey();
+  if (!key) return;
+  try { sessionStorage.setItem(key, JSON.stringify(snapshot)); } catch { /* Keep the live in-memory view if storage is unavailable. */ }
+}
 
 const flashcards = [
   { id: 1, front: "What is the formula for scaled dot-product attention?", back: "Attention(Q,K,V) = softmax(QK^T / √d_k) × V" },
@@ -11,50 +29,71 @@ const flashcards = [
   { id: 6, front: "Residual connection + layer norm order?", back: "Pre-LN? No — original Transformer uses: LayerNorm(x + Sublayer(x))." },
 ];
 
-const quizQuestions = [
-  {
-    id: 1,
-    q: "What is the primary reason for using multi-head attention instead of single-head attention?",
-    options: [
-      "It reduces the total number of parameters",
-      "It allows the model to jointly attend to different representation subspaces",
-      "It speeds up inference by parallelizing across GPUs",
-      "It prevents over-fitting by adding stochasticity",
-    ],
-    correct: 1,
-    explain: "Multi-head attention projects Q/K/V h times with different learned projections. Each head learns a different subspace, enabling richer representations.",
-  },
-  {
-    id: 2,
-    q: "In the encoder self-attention, each position can attend to:",
-    options: [
-      "Only previous positions",
-      "All positions in the input sequence",
-      "Only the CLS token",
-      "Exactly one position via argmax",
-    ],
-    correct: 1,
-    explain: "Encoder self-attention is bidirectional (causality mask applied only in decoder self-attention).",
-  },
-  {
-    id: 3,
-    q: "Training recipe: optimizer + learning rate schedule?",
-    options: [
-      "Adam + fixed LR = 1e-4",
-      "Adam + inverse sqrt warmup schedule",
-      "SGD with momentum + cosine decay",
-      "RMSProp + step decay every 10 epochs",
-    ],
-    correct: 1,
-    explain: "Paper uses Adam (β1=0.9, β2=0.98, ε=1e-9) with LR = d_model^-0.5 · min(step^-0.5, step · warmup^-1.5), warmup=4000.",
-  },
-];
+function randomizeQuizOptions(artifact) {
+  const questions = artifact?.payload?.questions;
+  if (!Array.isArray(questions)) return artifact;
+  return { ...artifact, payload: { ...artifact.payload, questions: questions.map((question) => {
+    const options = [...(question.options || [])];
+    const correctOption = options[question.answer];
+    for (let index = options.length - 1; index > 0; index -= 1) {
+      const swapIndex = Math.floor(Math.random() * (index + 1));
+      [options[index], options[swapIndex]] = [options[swapIndex], options[index]];
+    }
+    return { ...question, options, answer: options.indexOf(correctOption) };
+  }) } };
+}
+
+function GeneratedQuiz({ artifact, answers, setAnswers, onRetake, regenerating = false }) {
+  const questions = artifact?.payload?.questions || [];
+  const answeredCount = Object.keys(answers).length;
+  const score = Object.entries(answers).filter(([index, answer]) => questions[Number(index)]?.answer === answer).length;
+  const quizComplete = questions.length > 0 && answeredCount === questions.length;
+
+  if (!questions.length) return <div className="rounded-xl border border-dashed border-slate-300 bg-white p-8 text-center text-slate-600">Generate a paper-based quiz above to practice here.</div>;
+
+  return <div className="mx-auto max-w-3xl space-y-4">
+    <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white p-4">
+      <div><h2 className="font-bold text-slate-900">{artifact.title}</h2><p className="text-sm text-slate-500">{questions.length} questions · {artifact.payload?.difficulty || "medium"} difficulty · answers are checked against the paper</p></div>
+      <div className="rounded-full bg-primary-50 px-4 py-2 text-sm font-bold text-primary-700">Score: {score}/{questions.length} · {answeredCount}/{questions.length} answered</div>
+      <button onClick={onRetake} disabled={regenerating} className="rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-600 disabled:opacity-40">{regenerating ? "Generating…" : "New questions"}</button>
+    </div>
+    {questions.map((question, questionIndex) => {
+      const selectedAnswer = answers[questionIndex];
+      return <article key={`${questionIndex}-${question.question}`} className="space-y-3 rounded-2xl border border-slate-200 bg-white p-5">
+        <div className="flex items-start justify-between gap-3"><div><p className="text-xs font-black uppercase tracking-wider text-primary-600">Question {questionIndex + 1} of {questions.length}</p><h3 className="mt-1 text-lg font-bold leading-snug text-slate-900">{question.question}</h3></div>{question.page && <span className="shrink-0 rounded-full bg-indigo-50 px-2 py-1 text-xs text-indigo-700">p. {question.page}</span>}</div>
+        <div className="space-y-2">{question.options.map((option, optionIndex) => {
+          const isCorrect = optionIndex === question.answer;
+          const isSelected = selectedAnswer === optionIndex;
+          const style = selectedAnswer === undefined ? "border-slate-200 hover:border-primary-300 hover:bg-primary-50/50" : isCorrect ? "border-emerald-300 bg-emerald-50 text-emerald-900" : isSelected ? "border-red-300 bg-red-50 text-red-900" : "border-slate-100 bg-slate-50 text-slate-500";
+          return <button key={optionIndex} disabled={selectedAnswer !== undefined} onClick={() => setAnswers((current) => ({ ...current, [questionIndex]: optionIndex }))} className={`flex w-full items-start gap-3 rounded-xl border p-3 text-left text-sm transition ${style}`}><span className="font-bold">{String.fromCharCode(65 + optionIndex)}.</span><span>{option}</span>{selectedAnswer !== undefined && isCorrect && <span className="ml-auto text-xs font-semibold">Correct</span>}</button>;
+        })}</div>
+        {selectedAnswer !== undefined && <div className="rounded-lg bg-blue-50 p-3"><p className="text-xs font-semibold uppercase tracking-wide text-blue-700">{selectedAnswer === question.answer ? "Correct" : "Review"}</p><p className="mt-1 text-sm leading-relaxed text-slate-700">{question.explanation}</p></div>}
+      </article>;
+    })}
+    {quizComplete && <section aria-live="polite" className="rounded-2xl border-2 border-primary-200 bg-gradient-to-br from-white via-primary-50/50 to-indigo-50 p-6 text-center">
+      <p className="text-xs font-black uppercase tracking-wider text-primary-600">Quiz Results</p><h3 className="mt-2 text-3xl font-black text-slate-900">{score} / {questions.length} correct</h3>
+      <p className="mt-1 text-lg font-bold text-primary-700">{Math.round((score / questions.length) * 100)}%</p>
+      <p className="mt-2 text-slate-600">{score === questions.length ? "Excellent work — you got every question right!" : score >= questions.length * 0.7 ? "Great work — review any missed explanations to strengthen your understanding." : "Review the explanations above, then try again to improve your score."}</p>
+      <button onClick={onRetake} disabled={regenerating} className="mt-4 rounded-lg bg-primary-600 px-5 py-2.5 font-bold text-white hover:bg-primary-700 disabled:opacity-50">{regenerating ? "Generating new questions…" : "Retake with new questions"}</button>
+    </section>}
+  </div>;
+}
 
 export default function Learning() {
   const [availablePapers, setAvailablePapers] = useState([]);
   const [selectedPaperId, setSelectedPaperId] = useState("");
+  const [mindmapPrompt, setMindmapPrompt] = useState("");
   const [generatedCards, setGeneratedCards] = useState(null);
   const [generatedMindmap, setGeneratedMindmap] = useState(null);
+  const [generatedMindmapArtifactId, setGeneratedMindmapArtifactId] = useState(null);
+  const generatedMindmapRef = useRef(null);
+  const mindmapSaveQueueRef = useRef(Promise.resolve());
+  const [generatedQuiz, setGeneratedQuiz] = useState(null);
+  const [quizAnswers, setQuizAnswers] = useState({});
+  const [quizNotice, setQuizNotice] = useState("");
+  const [quizRegenerating, setQuizRegenerating] = useState(false);
+  const [quizGenerationError, setQuizGenerationError] = useState("");
+  const quizRegenerationInFlightRef = useRef(false);
   const [cardOrder, setCardOrder] = useState(() => flashcards.map((_, index) => index));
   const [cardRatings, setCardRatings] = useState({});
   const [retriedCards, setRetriedCards] = useState(() => new Set());
@@ -62,17 +101,96 @@ export default function Learning() {
   const [generationError, setGenerationError] = useState("");
   const [generationMode, setGenerationMode] = useState("");
   const [generationNotice, setGenerationNotice] = useState("");
+  const [selectedMindmapNodeId, setSelectedMindmapNodeId] = useState("root");
+  const [collapsedMindmapNodes, setCollapsedMindmapNodes] = useState(() => new Set());
+  const [expandingMindmapNodes, setExpandingMindmapNodes] = useState(() => new Set());
+  const [mindmapError, setMindmapError] = useState("");
+  const [mindmapNotice, setMindmapNotice] = useState("");
+  const [pendingMindmapFocusId, setPendingMindmapFocusId] = useState("");
+  const [mindmapSearch, setMindmapSearch] = useState("");
+  const [mindmapZoom, setMindmapZoom] = useState(1);
+  const [mindmapPan, setMindmapPan] = useState({ x: 0, y: 0 });
+  const [tab, setTab] = useState("cards");
+  const mapViewportRef = useRef(null);
+  const mapStageRef = useRef(null);
+  const panDragRef = useRef(null);
   useEffect(() => {
+    const cached = readLearningSession();
+    if (cached) {
+      if (cached.generatedMindmap?.nodes?.length) {
+        generatedMindmapRef.current = cached.generatedMindmap;
+        setGeneratedMindmap(cached.generatedMindmap);
+        setGeneratedMindmapArtifactId(cached.generatedMindmapArtifactId || null);
+      }
+      if (cached.generatedQuiz) setGeneratedQuiz(cached.generatedQuiz);
+      if (cached.generatedCards) setGeneratedCards(cached.generatedCards);
+      if (Array.isArray(cached.cardOrder)) setCardOrder(cached.cardOrder);
+      if (cached.cardRatings && typeof cached.cardRatings === "object") setCardRatings(cached.cardRatings);
+      if (Array.isArray(cached.retriedCards)) setRetriedCards(new Set(cached.retriedCards));
+      if (Number.isInteger(cached.cardIdx)) setCardIdx(cached.cardIdx);
+      if (typeof cached.flipped === "boolean") setFlipped(cached.flipped);
+      if (cached.quizAnswers && typeof cached.quizAnswers === "object") setQuizAnswers(cached.quizAnswers);
+      if (cached.selectedPaperId) setSelectedPaperId(cached.selectedPaperId);
+      if (typeof cached.mindmapPrompt === "string") setMindmapPrompt(cached.mindmapPrompt);
+      if (cached.selectedMindmapNodeId) setSelectedMindmapNodeId(cached.selectedMindmapNodeId);
+      if (Array.isArray(cached.collapsedMindmapNodes)) setCollapsedMindmapNodes(new Set(cached.collapsedMindmapNodes));
+      if (Number.isFinite(cached.mindmapZoom)) setMindmapZoom(cached.mindmapZoom);
+      if (cached.mindmapPan && Number.isFinite(cached.mindmapPan.x) && Number.isFinite(cached.mindmapPan.y)) setMindmapPan(cached.mindmapPan);
+      if (["cards", "quiz", "map"].includes(cached.tab)) setTab(cached.tab);
+      if (typeof cached.quizNotice === "string") setQuizNotice(cached.quizNotice);
+      if (cached.generatedQuiz && typeof performance !== "undefined" && performance.getEntriesByType("navigation")[0]?.type === "reload") {
+        regenerateQuiz(cached.generatedQuiz);
+      }
+    }
     apiFetch("/papers").then(({ papers }) => {
       setAvailablePapers(papers);
-      if (papers.length) setSelectedPaperId(papers[0].id);
+      if (papers.length) setSelectedPaperId((current) => current || papers[0].id);
     }).catch((err) => setGenerationError(err.message));
   }, []);
+  async function regenerateQuiz(previousArtifact = generatedQuiz) {
+    if (quizRegenerationInFlightRef.current) return;
+    const previousQuestions = previousArtifact?.payload?.questions || [];
+    const paperId = previousArtifact?.paper_id || previousArtifact?.payload?.source_paper_ids?.[0] || selectedPaperId;
+    if (!paperId) {
+      setQuizGenerationError("Could not find the source paper for this quiz. Choose a paper and generate a quiz first.");
+      return;
+    }
+    quizRegenerationInFlightRef.current = true;
+    setQuizRegenerating(true);
+    setQuizGenerationError("");
+    setQuizNotice("Generating a fresh set of paper-based questions…");
+    try {
+      const result = await apiFetch("/learning/generate", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          kind: "quiz",
+          paper_id: paperId,
+          count: Math.max(3, Math.min(20, previousQuestions.length || 8)),
+          difficulty: previousArtifact?.payload?.difficulty || "medium",
+          avoid_questions: previousQuestions.map((question) => question.question).filter(Boolean).slice(0, 20),
+          variation_seed: Date.now().toString(36),
+        }),
+      });
+      const nextQuiz = result.artifact;
+      if (!Array.isArray(nextQuiz?.payload?.questions) || !nextQuiz.payload.questions.length) {
+        throw new Error("The model did not return usable quiz questions. Your previous quiz is still available; try again.");
+      }
+      setGeneratedQuiz(randomizeQuizOptions(nextQuiz));
+      setQuizAnswers({});
+      setQuizNotice(nextQuiz.payload?._generation_notice || `A fresh ${nextQuiz.payload?.difficulty || "medium"}-level quiz is ready with new questions.`);
+    } catch (error) {
+      setQuizGenerationError(error.message || "Could not generate new questions. Your previous quiz is still available; try again.");
+      setQuizNotice("");
+    } finally {
+      quizRegenerationInFlightRef.current = false;
+      setQuizRegenerating(false);
+    }
+  }
   const generateFromPaper = async (kind) => {
     if (!selectedPaperId) { setGenerationError("Upload a paper first, then choose it here."); return; }
     setGenerating(true); setGenerationError(""); setGenerationMode(""); setGenerationNotice("");
     try {
-      const result = await apiFetch("/learning/generate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind, paper_id: selectedPaperId, count: kind === "mindmap" ? 6 : 8 }) });
+      const result = await apiFetch("/learning/generate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind, paper_id: selectedPaperId, count: kind === "mindmap" ? 6 : 8, prompt: kind === "mindmap" ? mindmapPrompt.trim() : "" }) });
       const payload = result.artifact.payload || {};
       setGenerationMode(payload._generation_mode || "");
       setGenerationNotice(payload._generation_notice || "");
@@ -84,39 +202,32 @@ export default function Learning() {
         setRetriedCards(new Set());
         setTab("cards"); setCardIdx(0); setFlipped(false);
       }
-      if (kind === "mindmap") { setGeneratedMindmap(payload); setTab("map"); }
+      if (kind === "mindmap") {
+        generatedMindmapRef.current = payload;
+        setGeneratedMindmap(payload);
+        setGeneratedMindmapArtifactId(result.artifact.id);
+        setSelectedMindmapNodeId("root");
+        setCollapsedMindmapNodes(new Set());
+        setMindmapZoom(1);
+        setMindmapPan({ x: 0, y: 0 });
+        setMindmapError("");
+        setTab("map");
+      }
     } catch (err) { setGenerationError(err.message); }
     finally { setGenerating(false); }
   };
-  const [tab, setTab] = useState("cards");
   const [cardIdx, setCardIdx] = useState(0);
   const [flipped, setFlipped] = useState(false);
-  const [quizIdx, setQuizIdx] = useState(0);
-  const [selected, setSelected] = useState(null);
-  const [score, setScore] = useState(0);
-  const [quizDone, setQuizDone] = useState(false);
-  const [answers, setAnswers] = useState(Array(quizQuestions.length).fill(null));
-
-  const handleAnswer = (optIdx) => {
-    if (answers[quizIdx] !== null) return;
-    setSelected(optIdx);
-    const a = [...answers]; a[quizIdx] = optIdx; setAnswers(a);
-    if (optIdx === quizQuestions[quizIdx].correct) setScore(s => s + 1);
-  };
-
-  const nextQuiz = () => {
-    if (quizIdx < quizQuestions.length - 1) {
-      setQuizIdx(quizIdx + 1);
-      setSelected(answers[quizIdx + 1]);
-    } else {
-      setQuizDone(true);
-    }
-  };
-
-  const resetQuiz = () => {
-    setQuizIdx(0); setSelected(null); setScore(0); setQuizDone(false);
-    setAnswers(Array(quizQuestions.length).fill(null));
-  };
+  useEffect(() => {
+    writeLearningSession({
+      tab, selectedPaperId, mindmapPrompt, generatedMindmap, generatedMindmapArtifactId,
+      selectedMindmapNodeId, collapsedMindmapNodes: [...collapsedMindmapNodes], mindmapZoom, mindmapPan,
+      generatedQuiz, quizAnswers, quizNotice, generatedCards, cardOrder, cardRatings,
+      retriedCards: [...retriedCards], cardIdx, flipped,
+    });
+  }, [tab, selectedPaperId, generatedMindmap, generatedMindmapArtifactId, selectedMindmapNodeId,
+    collapsedMindmapNodes, mindmapZoom, mindmapPan, mindmapPrompt, generatedQuiz, quizAnswers, quizNotice,
+    generatedCards, cardOrder, cardRatings, retriedCards, cardIdx, flipped]);
 
   const demoMindmapNodes = [
     { id: "center", label: "Transformer", x: 50, y: 50, color: "from-primary-500 to-accent-500", size: "lg" },
@@ -149,16 +260,298 @@ export default function Learning() {
     }
     advanceCard();
   };
-  const mindmapNodes = generatedMindmap ? (generatedMindmap.nodes || []).map((node, i, nodes) => {
-    const isRoot = node.id === "root";
-    const childIndex = isRoot ? 0 : nodes.slice(0, i).filter((item) => item.id !== "root").length;
-    const childCount = Math.max(nodes.length - 1, 1);
-    const angle = -Math.PI / 2 + (childIndex * 2 * Math.PI) / childCount;
-    return { id: node.id || `node-${i}`, label: node.label || node.title || "Topic", page: node.page, evidence: node.evidence,
-      x: isRoot ? 50 : 50 + 34 * Math.cos(angle), y: isRoot ? 50 : 50 + 37 * Math.sin(angle),
-      color: isRoot ? "from-primary-500 to-accent-500" : "from-primary-300 to-primary-600", size: isRoot ? "lg" : "sm" };
-  }) : demoMindmapNodes;
+  const rawMindmapNodes = generatedMindmap?.nodes || demoMindmapNodes.map(({ id, label }) => ({ id, label }));
   const mindmapEdges = generatedMindmap ? (generatedMindmap.edges || []) : demoMindmapEdges.map(([source, target]) => ({ source, target, label: "" }));
+  const mindmapChildren = mindmapEdges.reduce((children, edge) => {
+    (children[edge.source] ||= []).push(edge.target);
+    return children;
+  }, {});
+  const mindmapRoot = rawMindmapNodes.find((node) => node.id === "root" || node.id === "center") || rawMindmapNodes[0];
+  const mindmapPositions = new Map();
+  const mindmapDepths = new Map();
+  const mindmapParents = new Map();
+  let mindmapLayoutWidth = 1200;
+  let mindmapLayoutHeight = 600;
+  if (mindmapRoot) {
+    // Lay the map out as a tidy tree. Each leaf gets its own horizontal slot;
+    // parents are centered over their descendants, so newly generated sibling
+    // branches never reuse the same fixed radial coordinates.
+    let leafCount = 0;
+    let maxDepth = 0;
+    const laidOut = new Set();
+    const layoutSubtree = (nodeId, depth, branchId = nodeId) => {
+      if (laidOut.has(nodeId)) return null;
+      laidOut.add(nodeId);
+      maxDepth = Math.max(maxDepth, depth);
+      mindmapDepths.set(nodeId, depth);
+      const children = mindmapChildren[nodeId] || [];
+      const childCenters = [];
+      for (const childId of children) {
+        if (laidOut.has(childId)) continue;
+        mindmapParents.set(childId, { parentId: nodeId, branchId: depth === 0 ? childId : branchId });
+        const center = layoutSubtree(childId, depth + 1, depth === 0 ? childId : branchId);
+        if (center !== null) childCenters.push(center);
+      }
+      if (!childCenters.length) {
+        const center = leafCount * 420 + 210;
+        leafCount += 1;
+        mindmapPositions.set(nodeId, { x: center, y: 100 + depth * 260 });
+        return center;
+      }
+      const center = (childCenters[0] + childCenters[childCenters.length - 1]) / 2;
+      mindmapPositions.set(nodeId, { x: center, y: 100 + depth * 260 });
+      return center;
+    };
+    layoutSubtree(mindmapRoot.id, 0);
+    mindmapLayoutWidth = Math.max(1260, leafCount * 420);
+    mindmapLayoutHeight = Math.max(600, (maxDepth + 1) * 260 + 120);
+    const horizontalOffset = (mindmapLayoutWidth - leafCount * 420) / 2;
+    for (const [nodeId, position] of mindmapPositions) {
+      mindmapPositions.set(nodeId, { x: ((position.x + horizontalOffset) / mindmapLayoutWidth) * 100, y: (position.y / mindmapLayoutHeight) * 100 });
+    }
+  }
+  const mindmapNodes = rawMindmapNodes.map((node, index) => {
+    const id = node.id || `node-${index}`;
+    const isRoot = id === mindmapRoot?.id;
+    const position = mindmapPositions.get(id) || { x: 50, y: 50 };
+    const depth = mindmapDepths.get(id) || 0;
+    return { ...node, id, label: node.label || node.title || "Topic", x: position.x, y: position.y,
+      color: isRoot ? "from-primary-500 to-accent-500" : "from-primary-300 to-primary-600", size: isRoot ? "lg" : depth === 1 ? "md" : "sm", depth };
+  });
+  const visibleMindmapIds = new Set();
+  const visitMindmapNode = (id) => {
+    if (visibleMindmapIds.has(id)) return;
+    visibleMindmapIds.add(id);
+    if (!collapsedMindmapNodes.has(id)) (mindmapChildren[id] || []).forEach(visitMindmapNode);
+  };
+  const positionedMindmapRoot = mindmapNodes.find((node) => node.id === mindmapRoot?.id) || mindmapNodes[0];
+  if (positionedMindmapRoot) visitMindmapNode(positionedMindmapRoot.id);
+  const visibleMindmapNodes = mindmapNodes.filter((node) => visibleMindmapIds.has(node.id));
+  const selectedMindmapNode = mindmapNodes.find((node) => node.id === selectedMindmapNodeId) || positionedMindmapRoot;
+  const selectedMindmapPath = [];
+  if (selectedMindmapNode) {
+    let pathNode = selectedMindmapNode;
+    const seenPathIds = new Set();
+    while (pathNode && !seenPathIds.has(pathNode.id)) {
+      seenPathIds.add(pathNode.id);
+      selectedMindmapPath.unshift(pathNode);
+      const parentId = mindmapParents.get(pathNode.id)?.parentId;
+      pathNode = mindmapNodes.find((node) => node.id === parentId);
+    }
+  }
+  const selectedMindmapPathIds = new Set(selectedMindmapPath.map((node) => node.id));
+  const isDescendantOfSelectedMindmapNode = (nodeId) => {
+    let parentId = mindmapParents.get(nodeId)?.parentId;
+    const visited = new Set();
+    while (parentId && !visited.has(parentId)) {
+      if (parentId === selectedMindmapNode?.id) return true;
+      visited.add(parentId);
+      parentId = mindmapParents.get(parentId)?.parentId;
+    }
+    return false;
+  };
+  const focusMindmapNode = (node) => {
+    if (!node) return;
+    setSelectedMindmapNodeId(node.id);
+    const ancestorIds = new Set();
+    let ancestorId = node.id;
+    while (ancestorId && !ancestorIds.has(ancestorId)) {
+      ancestorIds.add(ancestorId);
+      ancestorId = mindmapParents.get(ancestorId)?.parentId;
+    }
+    setCollapsedMindmapNodes((current) => new Set([...current].filter((id) => !ancestorIds.has(id))));
+    const viewport = mapViewportRef.current;
+    const stage = mapStageRef.current;
+    const targetZoom = node.size === "lg" ? 1 : 1.05;
+    setMindmapZoom(targetZoom);
+    if (viewport && stage) {
+      setMindmapPan({
+        x: viewport.clientWidth / 2 - (node.x / 100) * stage.clientWidth * targetZoom,
+        y: viewport.clientHeight * 0.32 - (node.y / 100) * stage.clientHeight * targetZoom,
+      });
+    }
+  };
+  useEffect(() => {
+    if (!pendingMindmapFocusId) return undefined;
+    const frame = requestAnimationFrame(() => {
+      const node = mindmapNodes.find((item) => item.id === pendingMindmapFocusId);
+      const viewport = mapViewportRef.current;
+      const stage = mapStageRef.current;
+      if (node && viewport && stage) {
+        setMindmapZoom(1);
+        setMindmapPan({
+          x: viewport.clientWidth / 2 - (node.x / 100) * stage.clientWidth,
+          y: viewport.clientHeight * 0.32 - (node.y / 100) * stage.clientHeight,
+        });
+      }
+      setPendingMindmapFocusId("");
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [pendingMindmapFocusId, mindmapNodes]);
+  const expandMindmapNode = async (nodeId) => {
+    if (!generatedMindmap || expandingMindmapNodes.has(nodeId)) return;
+    const sourcePaperId = generatedMindmap.source_paper_ids?.[0] || selectedPaperId;
+    const parent = generatedMindmap.nodes?.find((node) => node.id === nodeId);
+    if (!sourcePaperId || !parent) return;
+    const ancestors = [];
+    let ancestorId = nodeId;
+    const ancestrySeen = new Set();
+    while (ancestorId && !ancestrySeen.has(ancestorId)) {
+      ancestrySeen.add(ancestorId);
+      const ancestor = mindmapNodes.find((node) => node.id === ancestorId);
+      if (ancestor) ancestors.unshift(ancestor.label);
+      ancestorId = mindmapParents.get(ancestorId)?.parentId;
+    }
+    setMindmapError("");
+    setMindmapNotice("");
+    setExpandingMindmapNodes((current) => new Set(current).add(nodeId));
+    try {
+      let result;
+      try {
+        result = await apiFetch("/learning/mindmap/expand", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            paper_id: sourcePaperId,
+            node_id: nodeId,
+            node_label: parent.label,
+            breadcrumb: ancestors,
+            context: [mindmapPrompt.trim() ? `Map direction: ${mindmapPrompt.trim()}` : "", parent.summary, parent.details, parent.evidence].filter(Boolean).join("\n").slice(0, 1600),
+            existing_nodes: mindmapNodes.map(({ id, label }) => ({ id, label })),
+          }),
+        });
+      } catch (error) {
+        // Older backend processes may still be running after an update and lack
+        // the dedicated expansion route. Reuse the original generation API with
+        // the selected branch as its focus so node exploration still works.
+        if (error.status !== 404) throw error;
+        const legacyResult = await apiFetch("/learning/generate", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            kind: "mindmap", paper_id: sourcePaperId, count: 6,
+            prompt: [
+              `Expand only this selected mind-map branch: ${parent.label}.`,
+              `Path: ${ancestors.join(" > ")}.`,
+              `Create new child concepts under ${parent.label}, not another overall paper map.`,
+              `Avoid these existing concepts: ${mindmapNodes.map((node) => node.label).join(", ")}.`,
+              parent.summary, parent.details, parent.evidence, mindmapPrompt.trim(),
+            ].filter(Boolean).join("\n").slice(0, 1000),
+          }),
+        });
+        const legacyPayload = legacyResult.artifact?.payload || {};
+        const existingLabels = new Set(mindmapNodes.map((node) => node.label?.trim().toLocaleLowerCase()));
+        const legacyChildren = (legacyPayload.nodes || [])
+          .filter((node) => node.id !== "root" && node.label && !existingLabels.has(node.label.trim().toLocaleLowerCase()))
+          .slice(0, 6)
+          .map((node, index) => ({
+            ...node,
+            id: `${nodeId}-${Date.now().toString(36)}-${index}`,
+            summary: node.summary || node.evidence || `${node.label} is discussed in the selected paper.`,
+            details: node.details || node.evidence || `${node.label} is discussed in the selected paper.`,
+            example: node.example || "",
+            key_points: node.key_points || [],
+            related_concepts: node.related_concepts || [],
+            importance: Boolean(node.importance),
+          }));
+        if (!legacyChildren.length) {
+          throw new Error("The older backend could not create distinct child concepts. Restart it and try again.");
+        }
+        result = {
+          parent_id: nodeId,
+          children: legacyChildren,
+          edges: legacyChildren.map((node) => ({ source: nodeId, target: node.id, label: "includes" })),
+        };
+      }
+      const currentMap = generatedMindmapRef.current || generatedMindmap;
+      const existingIds = new Set((currentMap.nodes || []).map((node) => node.id));
+      const seenLabels = new Set((currentMap.nodes || []).map((node) => node.label?.trim().toLocaleLowerCase()));
+      const newChildren = (result.children || []).filter((node) => {
+        const label = node.label?.trim().toLocaleLowerCase();
+        if (!node.id || !label || existingIds.has(node.id) || seenLabels.has(label)) return false;
+        seenLabels.add(label);
+        return true;
+      });
+      if (!newChildren.length) throw new Error("The model did not return any new concepts for this branch.");
+      const acceptedIds = new Set([...existingIds, ...newChildren.map((node) => node.id)]);
+      const newEdges = (result.edges || []).filter((edge) => acceptedIds.has(edge.source) && acceptedIds.has(edge.target)
+        && !(currentMap.edges || []).some((existing) => existing.source === edge.source && existing.target === edge.target));
+      const updatedMap = {
+        ...currentMap,
+        nodes: [...(currentMap.nodes || []), ...newChildren],
+        edges: [...(currentMap.edges || []), ...newEdges],
+      };
+      generatedMindmapRef.current = updatedMap;
+      setGeneratedMindmap(updatedMap);
+      setPendingMindmapFocusId(nodeId);
+      setCollapsedMindmapNodes((current) => { const next = new Set(current); next.delete(nodeId); return next; });
+      setMindmapNotice(`Added ${newChildren.length} source-grounded concepts under ${parent.label}.`);
+      if (generatedMindmapArtifactId) {
+        try {
+          mindmapSaveQueueRef.current = mindmapSaveQueueRef.current.catch(() => {}).then(() => apiFetch(`/artifacts/${generatedMindmapArtifactId}`, {
+            method: "PATCH", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ payload: generatedMindmapRef.current }),
+          }));
+          await mindmapSaveQueueRef.current;
+        } catch {
+          setMindmapNotice("New concepts are available in this view, but could not be saved to your history.");
+        }
+      }
+    } catch (error) {
+      setMindmapError(error.message || "Could not expand this branch. Try again.");
+    } finally {
+      setExpandingMindmapNodes((current) => { const next = new Set(current); next.delete(nodeId); return next; });
+    }
+  };
+  const chooseMindmapNode = (node) => {
+    focusMindmapNode(node);
+    if (collapsedMindmapNodes.has(node.id)) {
+      setCollapsedMindmapNodes((current) => { const next = new Set(current); next.delete(node.id); return next; });
+    } else if (!(mindmapChildren[node.id] || []).length && generatedMindmap) {
+      expandMindmapNode(node.id);
+    }
+  };
+  const searchMindmap = (event) => {
+    event.preventDefault();
+    const query = mindmapSearch.trim().toLocaleLowerCase();
+    if (!query) return;
+    const match = mindmapNodes.find((node) => node.label.toLocaleLowerCase().includes(query));
+    if (match) focusMindmapNode(match);
+    else if (mindmapSearch.trim()) setMindmapError(`No concept matched “${mindmapSearch.trim()}”.`);
+  };
+  const startMindmapPan = (event) => {
+    if (event.target.closest("button, a, input")) return;
+    panDragRef.current = { x: event.clientX, y: event.clientY, panX: mindmapPan.x, panY: mindmapPan.y };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+  const moveMindmapPan = (event) => {
+    if (!panDragRef.current) return;
+    setMindmapPan({
+      x: panDragRef.current.panX + event.clientX - panDragRef.current.x,
+      y: panDragRef.current.panY + event.clientY - panDragRef.current.y,
+    });
+  };
+  const stopMindmapPan = () => { panDragRef.current = null; };
+  const downloadMindmap = () => {
+    const rootLabel = mindmapRoot?.label || "Mind map";
+    const lines = [`# ${rootLabel}`, ""];
+    const appendChildren = (parentId, depth, path = new Set()) => {
+      if (path.has(parentId)) return;
+      const nextPath = new Set(path).add(parentId);
+      (mindmapChildren[parentId] || []).forEach((childId) => {
+        const child = mindmapNodes.find((node) => node.id === childId);
+        if (!child) return;
+        const edge = mindmapEdges.find((item) => item.source === parentId && item.target === childId);
+        lines.push(`${"  ".repeat(depth)}- **${child.label}**${edge?.label ? ` — ${edge.label}` : ""}${child.page ? ` (p. ${child.page})` : ""}`);
+        appendChildren(childId, depth + 1, nextPath);
+      });
+    };
+    if (mindmapRoot) appendChildren(mindmapRoot.id, 1);
+    const blobUrl = URL.createObjectURL(new Blob([lines.join("\n")], { type: "text/markdown;charset=utf-8" }));
+    const anchor = document.createElement("a");
+    anchor.href = blobUrl;
+    anchor.download = `${rootLabel.replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "") || "mind-map"}.md`;
+    anchor.click();
+    URL.revokeObjectURL(blobUrl);
+  };
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -173,6 +566,11 @@ export default function Learning() {
         <select id="study-paper" value={selectedPaperId} onChange={(e) => setSelectedPaperId(e.target.value)} className="min-w-64 rounded-lg border border-slate-200 px-3 py-2 text-sm" disabled={!availablePapers.length}>
           {availablePapers.length ? availablePapers.map((paper) => <option key={paper.id} value={paper.id}>{paper.filename}</option>) : <option value="">No uploaded papers</option>}
         </select>
+        <div className="w-full space-y-1.5">
+          <label htmlFor="mindmap-prompt" className="block text-sm font-semibold text-slate-700">Mind map prompt <span className="font-normal text-slate-400">(optional)</span></label>
+          <textarea id="mindmap-prompt" value={mindmapPrompt} onChange={(event) => setMindmapPrompt(event.target.value)} maxLength={1000} rows={3} placeholder="Tell ScholarMind how to organize the map—for example, focus on the research problem, methods, results, and limitations." className="w-full resize-y rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700 outline-none transition placeholder:text-slate-400 focus:border-primary-400 focus:ring-2 focus:ring-primary-100" />
+          <p className="text-xs text-slate-500">The map will stay grounded in the selected paper. {mindmapPrompt.length}/1000</p>
+        </div>
         <button onClick={() => generateFromPaper("flashcards")} disabled={generating || !selectedPaperId} className="rounded-lg bg-primary-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">{generating ? "Generating…" : "Generate flashcards"}</button>
         <button onClick={() => generateFromPaper("mindmap")} disabled={generating || !selectedPaperId} className="rounded-lg border border-primary-200 px-4 py-2 text-sm font-semibold text-primary-700 disabled:opacity-50">Generate mind map</button>
         {generationError && <p className="w-full text-sm text-red-600">{generationError}</p>}
@@ -180,12 +578,14 @@ export default function Learning() {
         {generationMode === "ai" && <p className="w-full text-sm font-medium text-emerald-700">AI-generated from the selected PDF.</p>}
       </div>
 
-      <ArtifactGenerator kinds={["quiz", "visualization"]} heading="Generate a source-based quiz or visualization outline" />
+      <ArtifactGenerator kinds={["quiz", "visualization"]} heading="Generate a source-based quiz or visualization outline" onQuizGenerated={(artifact) => { setGeneratedQuiz(randomizeQuizOptions(artifact)); setQuizAnswers({}); setQuizNotice(artifact.payload?._generation_notice || `Your ${artifact.payload?.difficulty || "medium"} quiz is ready below.`); setTab("quiz"); }} />
+      {quizNotice && <p role="status" className="-mt-4 rounded-lg bg-emerald-50 px-4 py-2 text-sm font-medium text-emerald-800">{quizNotice}</p>}
+      {quizGenerationError && <p role="alert" className="-mt-4 rounded-lg bg-red-50 px-4 py-2 text-sm font-medium text-red-800">{quizGenerationError} {generatedQuiz && <button onClick={() => regenerateQuiz()} className="ml-1 font-bold underline">Try again</button>}</p>}
 
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
         {[
           { l: "Flashcards Mastered", v: visibleCards.length ? `${Math.round((Object.values(cardRatings).filter((rating) => rating === "got-it").length / visibleCards.length) * 100)}%` : "—", sub: `${Object.keys(cardRatings).length} reviewed of ${visibleCards.length}`, i: "🃏" },
-          { l: "Quiz Score", v: `${score}/${quizQuestions.length}`, sub: quizDone ? "Complete" : "In progress", i: "✅" },
+          { l: "Papers Available", v: availablePapers.length, sub: "Ready for paper-based learning", i: "📄" },
           { l: "Mind Map Topics", v: mindmapNodes.length, sub: "Key concepts linked", i: "🗺" },
           { l: "Study Time", v: "2h 14m", sub: "This week", i: "⏱" },
         ].map((s, i) => (
@@ -269,128 +669,105 @@ export default function Learning() {
         </div>
       )}
 
-      {tab === "quiz" && (
-        <div className="max-w-3xl mx-auto">
-          {!quizDone ? (
-            <div className="rounded-2xl border border-slate-200 bg-white p-7 space-y-5">
-              <div className="flex items-center justify-between">
-                <div>
-                  <span className="text-xs font-black uppercase tracking-wider text-primary-600">Question {quizIdx + 1} of {quizQuestions.length}</span>
-                  <h3 className="mt-1 text-2xl font-black text-slate-900 leading-snug">{quizQuestions[quizIdx].q}</h3>
-                </div>
-                <span className="px-4 py-2 rounded-full bg-primary-50 text-primary-700 text-sm font-black">Score: {score}</span>
-              </div>
-              <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
-                <div className="h-full bg-gradient-to-r from-primary-500 to-accent-500 transition-all" style={{ width: `${((quizIdx + (answers[quizIdx] !== null ? 1 : 0)) / quizQuestions.length) * 100}%` }} />
-              </div>
-
-              <div className="space-y-3">
-                {quizQuestions[quizIdx].options.map((opt, i) => {
-                  const revealed = answers[quizIdx] !== null;
-                  const isCorrect = i === quizQuestions[quizIdx].correct;
-                  const isChosen = selected === i;
-                  let cls = "border-slate-200 bg-white hover:bg-slate-50";
-                  if (revealed && isCorrect) cls = "border-success-400 bg-success-50 ring-2 ring-success-200";
-                  else if (revealed && isChosen && !isCorrect) cls = "border-error-400 bg-error-50 ring-2 ring-error-200";
-                  return (
-                    <button key={i} onClick={() => handleAnswer(i)} className={`w-full p-4 rounded-xl border-2 text-left transition ${cls}`}>
-                      <div className="flex items-start gap-3">
-                        <span className={`w-8 h-8 rounded-lg flex items-center justify-center font-black flex-shrink-0 border-2 ${revealed && isCorrect ? "bg-success-500 border-success-500 text-white" : revealed && isChosen ? "bg-error-500 border-error-500 text-white" : "bg-white border-slate-200 text-slate-500"}`}>
-                          {String.fromCharCode(65 + i)}
-                        </span>
-                        <span className="text-slate-800 font-medium">{opt}</span>
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
-
-              {answers[quizIdx] !== null && (
-                <div className="p-5 rounded-xl bg-slate-50 border border-slate-100 animate-fade-in">
-                  <p className="text-xs font-black uppercase tracking-wider text-primary-600 mb-1">💡 Explanation</p>
-                  <p className="text-sm text-slate-700 leading-relaxed">{quizQuestions[quizIdx].explain}</p>
-                </div>
-              )}
-
-              {answers[quizIdx] !== null && (
-                <button onClick={nextQuiz} className="w-full py-3.5 rounded-xl bg-gradient-to-r from-primary-600 to-primary-500 text-white font-black shadow-lg shadow-primary-500/25 hover:shadow-xl hover:shadow-primary-500/30 transition flex items-center justify-center gap-2">
-                  {quizIdx < quizQuestions.length - 1 ? "Next Question →" : "View Final Results →"}
-                </button>
-              )}
-            </div>
-          ) : (
-            <div className="rounded-2xl border-2 border-primary-200 bg-gradient-to-br from-white via-primary-50/30 to-accent-50/30 p-10 text-center overflow-hidden relative">
-              <div className="absolute -top-16 -right-16 w-64 h-64 rounded-full bg-gradient-to-br from-primary-400/20 to-accent-400/20" />
-              <div className="relative">
-                <div className="w-28 h-28 mx-auto rounded-[2.5rem] bg-gradient-to-br from-primary-500 to-accent-500 flex items-center justify-center shadow-2xl shadow-primary-500/30 mb-6">
-                  <span className="text-6xl font-black text-white">{Math.round((score / quizQuestions.length) * 100)}%</span>
-                </div>
-                <h2 className="text-4xl font-black text-slate-900 mb-2">
-                  {score === quizQuestions.length ? "🎉 Perfect Score!" : score >= 2 ? "🔥 Great Job!" : "📚 Keep Practicing"}
-                </h2>
-                <p className="text-lg text-slate-600 mb-8">
-                  You got <span className="font-black text-primary-700">{score}</span> out of <span className="font-black">{quizQuestions.length}</span> questions correct.
-                </p>
-                <div className="flex flex-wrap items-center justify-center gap-3">
-                  <button onClick={resetQuiz} className="px-6 py-3 rounded-xl border-2 border-slate-200 bg-white text-slate-700 font-bold hover:bg-slate-50 transition flex items-center gap-2">
-                    🔁 Retry Quiz
-                  </button>
-                  <button onClick={() => setTab("cards")} className="px-6 py-3 rounded-xl border-2 border-primary-200 bg-primary-50 text-primary-700 font-bold hover:bg-primary-100 transition flex items-center gap-2">
-                    🃏 Review Flashcards
-                  </button>
-                  <button onClick={() => setTab("map")} className="px-6 py-3 rounded-xl bg-gradient-to-r from-primary-600 to-primary-500 text-white font-black shadow-lg shadow-primary-500/25 hover:shadow-xl hover:shadow-primary-500/30 transition flex items-center gap-2">
-                    🗺 Explore Mind Map →
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
+      {tab === "quiz" && <div><GeneratedQuiz artifact={generatedQuiz} answers={quizAnswers} setAnswers={setQuizAnswers} onRetake={() => regenerateQuiz()} regenerating={quizRegenerating} /></div>}
 
       {tab === "map" && (
         <div className="rounded-2xl border border-slate-200 bg-gradient-to-br from-white via-slate-50 to-primary-50/30 overflow-hidden">
-          <div className="p-5 border-b border-slate-200 bg-white flex items-center justify-between">
+          <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-200 bg-white p-5">
             <div>
               <h3 className="font-black text-xl text-slate-900">{generatedMindmap ? "Generated Paper Mind Map" : "Transformer Architecture Mind Map"}</h3>
-              <p className="text-sm text-slate-500">Each concept cites its paper page. Hover over a node to inspect the supporting passage.</p>
+              <p className="text-sm text-slate-500">Select a concept to focus its branch; surrounding topics shrink while you explore. Drag to pan and use the zoom controls to navigate.</p>
             </div>
-            <div className="flex gap-1 p-1 rounded-lg bg-slate-100">
-              <button className="px-3 py-1.5 rounded-md bg-white shadow-sm text-xs font-bold text-primary-700">🔭 Explore</button>
-              <button className="px-3 py-1.5 rounded-md text-xs font-bold text-slate-500 hover:text-slate-700">✏ Edit</button>
-              <button className="px-3 py-1.5 rounded-md text-xs font-bold text-slate-500 hover:text-slate-700">➕ Expand</button>
+            <div className="flex flex-wrap items-center gap-2">
+              <form onSubmit={searchMindmap} className="flex items-center gap-1 rounded-lg border border-slate-200 bg-white p-1">
+                <input list="mindmap-concept-options" value={mindmapSearch} onChange={(event) => setMindmapSearch(event.target.value)} aria-label="Search concepts in mind map" placeholder="Find a concept…" className="w-36 rounded-md px-2 py-1.5 text-sm outline-none sm:w-48" />
+                <datalist id="mindmap-concept-options">{mindmapNodes.map((node) => <option key={node.id} value={node.label} />)}</datalist>
+                <button type="submit" className="rounded-md bg-slate-100 px-3 py-1.5 text-sm font-semibold text-slate-700 hover:bg-slate-200">Find</button>
+              </form>
+              <button onClick={() => setCollapsedMindmapNodes(new Set(mindmapRoot ? [mindmapRoot.id] : []))} disabled={!mindmapRoot || !(mindmapChildren[mindmapRoot.id] || []).length} className="rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-40">Collapse branches</button>
+              <button onClick={() => {
+                if (!mindmapRoot) return;
+                setSelectedMindmapNodeId(mindmapRoot.id);
+                setCollapsedMindmapNodes((current) => { const next = new Set(current); next.delete(mindmapRoot.id); return next; });
+                setMindmapZoom(1);
+                const viewport = mapViewportRef.current;
+                if (viewport) {
+                  viewport.scrollTo({ top: 0, left: 0, behavior: "smooth" });
+                  const rootPosition = mindmapPositions.get(mindmapRoot.id) || { x: 50, y: 50 };
+                  setMindmapPan({ x: Math.max(12, viewport.clientWidth / 2 - (rootPosition.x / 100) * mindmapLayoutWidth), y: 20 - (rootPosition.y / 100) * mindmapLayoutHeight });
+                } else setMindmapPan({ x: 0, y: 0 });
+              }} disabled={!mindmapRoot} className="rounded-lg border border-primary-200 bg-primary-50 px-3 py-2 text-sm font-semibold text-primary-700 hover:bg-primary-100 disabled:opacity-40">Show root</button>
+              <button onClick={() => setCollapsedMindmapNodes(new Set())} disabled={!collapsedMindmapNodes.size} className="rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-40">Expand all</button>
+              <div className="flex items-center rounded-lg border border-slate-200 bg-white p-1" aria-label="Mind map zoom controls">
+                <button onClick={() => setMindmapZoom((value) => Math.max(0.6, Math.round((value - 0.1) * 10) / 10))} disabled={mindmapZoom <= 0.6} aria-label="Zoom out" className="h-8 w-8 rounded-md text-lg font-bold text-slate-700 hover:bg-slate-100 disabled:opacity-40">−</button>
+                <button onClick={() => { setMindmapZoom(1); setMindmapPan({ x: 0, y: 0 }); }} aria-label="Reset zoom and position" className="min-w-14 px-2 text-xs font-semibold text-slate-600">{Math.round(mindmapZoom * 100)}%</button>
+                <button onClick={() => setMindmapZoom((value) => Math.min(1.6, Math.round((value + 0.1) * 10) / 10))} disabled={mindmapZoom >= 1.6} aria-label="Zoom in" className="h-8 w-8 rounded-md text-lg font-bold text-slate-700 hover:bg-slate-100 disabled:opacity-40">+</button>
+              </div>
+              <button onClick={downloadMindmap} disabled={!mindmapRoot} className="rounded-lg bg-primary-600 px-3 py-2 text-sm font-semibold text-white hover:bg-primary-700 disabled:opacity-40">Download outline</button>
             </div>
           </div>
           {mindmapNodes.length === 0 && <p className="p-8 text-center text-slate-600">No validated mind map was returned. Check your configured AI model, then generate again.</p>}
-          <div className="h-[600px] relative">
-            <svg className="absolute inset-0 w-full h-full">
+          {mindmapError && <p role="alert" className="border-b border-red-100 bg-red-50 px-5 py-3 text-sm text-red-800">{mindmapError}</p>}
+          {mindmapNotice && <p role="status" className="border-b border-emerald-100 bg-emerald-50 px-5 py-3 text-sm text-emerald-800">{mindmapNotice}</p>}
+          {mindmapNodes.length > 0 && <div ref={mapViewportRef} onPointerDown={startMindmapPan} onPointerMove={moveMindmapPan} onPointerUp={stopMindmapPan} onPointerCancel={stopMindmapPan} className="relative h-[min(72vh,720px)] min-h-[480px] overflow-hidden touch-none bg-[radial-gradient(#cbd5e1_0.8px,transparent_0.8px)] [background-size:20px_20px] cursor-grab active:cursor-grabbing">
+          <div ref={mapStageRef} className="relative min-w-[760px] transition-transform duration-300 ease-out" style={{ width: `${mindmapLayoutWidth}px`, height: `${mindmapLayoutHeight}px`, transform: `translate(${mindmapPan.x}px, ${mindmapPan.y}px) scale(${mindmapZoom})`, transformOrigin: "0 0" }}>
+            <svg className="absolute inset-0 h-full w-full" aria-hidden="true">
               <defs>
-                <marker id="arrow" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
-                  <polygon points="0 0, 10 3.5, 0 7" fill="#cbd5e1" />
+                <marker id="mindmap-arrow" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+                  <polygon points="0 0, 10 3.5, 0 7" fill="#94a3b8" />
                 </marker>
               </defs>
               {mindmapEdges.map((edge, i) => {
-                const na = mindmapNodes.find(n => n.id === edge.source);
-                const nb = mindmapNodes.find(n => n.id === edge.target);
+                const na = visibleMindmapNodes.find(n => n.id === edge.source);
+                const nb = visibleMindmapNodes.find(n => n.id === edge.target);
                 if (!na || !nb) return null;
                 return <g key={i}>
-                  <line x1={`${na.x}%`} y1={`${na.y}%`} x2={`${nb.x}%`} y2={`${nb.y}%`} stroke="#cbd5e1" strokeWidth="2" markerEnd="url(#arrow)" />
-                  {edge.label && <text x={`${(na.x + nb.x) / 2}%`} y={`${(na.y + nb.y) / 2}%`} textAnchor="middle" className="fill-slate-500" fontSize="11">{edge.label}</text>}
+                  <line x1={`${na.x}%`} y1={`${na.y}%`} x2={`${nb.x}%`} y2={`${nb.y}%`} stroke="#94a3b8" strokeOpacity="0.65" strokeWidth="2" markerEnd="url(#mindmap-arrow)" />
+                  {edge.label && <text x={`${(na.x + nb.x) / 2}%`} y={`${(na.y + nb.y) / 2}%`} textAnchor="middle" className="fill-slate-700" fontSize="12" fontWeight="600" paintOrder="stroke" stroke="white" strokeWidth="5" strokeLinejoin="round">{edge.label}</text>}
                 </g>;
               })}
             </svg>
-            {mindmapNodes.map(n => (
-              <div key={n.id} className="absolute -translate-x-1/2 -translate-y-1/2 cursor-pointer group" style={{ left: `${n.x}%`, top: `${n.y}%` }}>
-                <div className={`rounded-2xl bg-gradient-to-br ${n.color} text-white shadow-xl shadow-primary-500/20 hover:scale-110 hover:shadow-2xl hover:shadow-primary-500/40 transition-all ${n.size === "lg" ? "px-7 py-5" : n.size === "md" ? "px-5 py-3.5" : "px-4 py-2.5"}`}>
-                  <p className={`font-black whitespace-nowrap text-white ${n.size === "lg" ? "text-2xl" : n.size === "md" ? "text-lg" : "text-sm"}`}>{n.label}</p>
-                  {n.page && <p className="mt-1 text-center text-xs font-semibold text-white/80">Source · p. {n.page}</p>}
+            {visibleMindmapNodes.map((n) => {
+              const isSelected = selectedMindmapNode?.id === n.id;
+              const isAncestor = selectedMindmapPathIds.has(n.id) && !isSelected;
+              const isDescendant = isDescendantOfSelectedMindmapNode(n.id);
+              const nodeScale = isSelected ? 1.1 : isDescendant ? 0.92 : isAncestor ? 0.76 : 0.62;
+              const nodeOpacity = isSelected || isDescendant ? 1 : isAncestor ? 0.76 : 0.48;
+              return <div key={n.id} className="absolute -translate-x-1/2 -translate-y-1/2" style={{ left: `${n.x}%`, top: `${n.y}%`, zIndex: isSelected ? 20 : isAncestor || isDescendant ? 10 : 1 }}>
+                <div className="transition-[scale,opacity] duration-300 ease-out" style={{ scale: String(nodeScale), opacity: nodeOpacity }}>
+                <button onClick={() => chooseMindmapNode(n)} aria-pressed={selectedMindmapNode?.id === n.id} aria-label={`${n.label}${expandingMindmapNodes.has(n.id) ? ", generating subtopics" : ""}`} className={`w-fit rounded-2xl border text-white transition hover:-translate-y-0.5 ${n.size === "lg" ? "min-w-[14rem] max-w-[28rem] px-7 py-5" : "min-w-[14rem] max-w-[22rem] px-5 py-4"} ${selectedMindmapNode?.id === n.id ? "border-white ring-4 ring-primary-300 shadow-2xl shadow-primary-900/25" : "border-white/30 shadow-xl shadow-indigo-900/20 hover:shadow-2xl"}`} style={{ backgroundColor: n.size === "lg" ? "#6d28d9" : "#4f46e5", backgroundImage: n.size === "lg" ? "linear-gradient(135deg, #6d28d9 0%, #4f46e5 52%, #c026c7 100%)" : "linear-gradient(135deg, #0284c7 0%, #4338ca 100%)", textShadow: "0 1px 2px rgba(15,23,42,0.35)" }}>
+                  <span className={`block whitespace-normal break-words [overflow-wrap:anywhere] text-center font-extrabold leading-snug ${n.size === "lg" ? "text-xl" : "text-base"}`}>{n.label}</span>
+                  {n.page && <span className="mt-1 block text-center text-xs font-semibold text-white/80">Source · p. {n.page}</span>}
+                  {expandingMindmapNodes.has(n.id) && <span className="mt-2 block text-xs font-semibold text-white/90">Generating subtopics…</span>}
+                </button>
+                {(mindmapChildren[n.id] || []).length > 0 && <button onClick={(event) => { event.stopPropagation(); setCollapsedMindmapNodes((current) => { const next = new Set(current); if (next.has(n.id)) next.delete(n.id); else next.add(n.id); return next; }); }} aria-label={`${collapsedMindmapNodes.has(n.id) ? "Expand" : "Collapse"} ${n.label} branch`} title={`${collapsedMindmapNodes.has(n.id) ? "Expand" : "Collapse"} branch`} className="absolute -right-2 -top-2 grid h-7 w-7 place-items-center rounded-full border-2 border-white bg-slate-900 text-sm font-bold text-white shadow-md hover:bg-primary-700">{collapsedMindmapNodes.has(n.id) ? "+" : "−"}</button>}
                 </div>
-                <div className="absolute left-1/2 z-10 w-64 -translate-x-1/2 top-full mt-2 rounded-lg bg-slate-900 text-white text-xs px-3 py-2 opacity-0 group-hover:opacity-100 transition pointer-events-none whitespace-normal shadow-lg">
-                  <span className="font-semibold">Evidence from p. {n.page}: </span>{n.evidence || "Demo concept"}
-                </div>
-              </div>
-            ))}
+              </div>;
+            })}
           </div>
+          </div>}
+          {selectedMindmapNode && <section className="border-t border-slate-200 bg-white p-5" aria-live="polite">
+            <div className="flex flex-wrap items-start justify-between gap-4">
+              <div className="min-w-0 flex-1">
+                <p className="text-xs font-black uppercase tracking-wider text-primary-600">Selected concept</p>
+                <h4 className="mt-1 text-lg font-bold text-slate-900">{selectedMindmapNode.label}</h4>
+                <nav aria-label="Mind map breadcrumb" className="mt-2 flex flex-wrap items-center gap-1 text-xs text-slate-500">
+                  {selectedMindmapPath.map((node, index) => <span key={node.id} className="inline-flex items-center gap-1">{index > 0 && <span aria-hidden="true">›</span>}<button onClick={() => focusMindmapNode(node)} className={`rounded px-1 py-0.5 hover:bg-primary-50 hover:text-primary-700 ${index === selectedMindmapPath.length - 1 ? "font-bold text-slate-800" : ""}`}>{node.label}</button></span>)}
+                </nav>
+                <p className="mt-3 max-w-4xl text-sm leading-relaxed text-slate-700">{selectedMindmapNode.summary || selectedMindmapNode.evidence || "Select a concept to inspect its supporting detail."}</p>
+                {selectedMindmapNode.details && <p className="mt-2 max-w-4xl text-sm leading-relaxed text-slate-600">{selectedMindmapNode.details}</p>}
+                {selectedMindmapNode.example && <p className="mt-3 max-w-4xl rounded-lg bg-amber-50 p-3 text-sm text-amber-950"><strong>Example: </strong>{selectedMindmapNode.example}</p>}
+                {!!selectedMindmapNode.key_points?.length && <ul className="mt-3 grid max-w-4xl gap-2 sm:grid-cols-2">{selectedMindmapNode.key_points.map((point, index) => <li key={`${index}-${point}`} className="rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-700">{selectedMindmapNode.importance && <span className="mr-1 text-amber-500" title="Important concept">★</span>}{point}</li>)}</ul>}
+                {!!selectedMindmapNode.related_concepts?.length && <div className="mt-3 flex flex-wrap items-center gap-2"><span className="text-xs font-bold uppercase tracking-wide text-slate-500">Related concepts</span>{selectedMindmapNode.related_concepts.map((concept) => <button key={concept} onClick={() => { const relatedNode = mindmapNodes.find((node) => node.label.toLocaleLowerCase() === concept.toLocaleLowerCase()); if (relatedNode) chooseMindmapNode(relatedNode); else { setMindmapSearch(concept); expandMindmapNode(selectedMindmapNode.id); } }} className="rounded-full border border-primary-100 bg-primary-50 px-3 py-1 text-xs font-semibold text-primary-700 hover:bg-primary-100">{concept}</button>)}</div>}
+                {selectedMindmapNode.evidence && <blockquote className="mt-3 max-w-4xl border-l-2 border-primary-300 pl-3 text-sm italic text-slate-500">“{selectedMindmapNode.evidence}”</blockquote>}
+              </div>
+              {selectedMindmapNode.page && <span className="shrink-0 rounded-full bg-primary-50 px-3 py-1.5 text-xs font-semibold text-primary-700">Source page {selectedMindmapNode.page}</span>}
+              <div className="flex flex-wrap gap-2">
+                <button onClick={() => expandMindmapNode(selectedMindmapNode.id)} disabled={!generatedMindmap || expandingMindmapNodes.has(selectedMindmapNode.id)} className="rounded-lg border border-primary-200 px-4 py-2.5 text-sm font-bold text-primary-700 hover:bg-primary-50 disabled:opacity-50">{expandingMindmapNodes.has(selectedMindmapNode.id) ? "Generating…" : "Generate deeper branches"}</button>
+                <Link to={`/chat?question=${encodeURIComponent(`Explain “${selectedMindmapNode.label}” using my uploaded paper, and cite the relevant page.`)}${generatedMindmap?.source_paper_ids?.[0] ? `&paper_id=${encodeURIComponent(generatedMindmap.source_paper_ids[0])}` : ""}`} className="shrink-0 rounded-lg bg-primary-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-primary-700">Ask in chat</Link>
+              </div>
+            </div>
+          </section>}
         </div>
       )}
     </div>

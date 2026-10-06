@@ -21,7 +21,6 @@ export default function UploadZone({ onFilesSelected, className = "" }) {
     const allowedExtensions = [
       ".pdf",
       ".docx",
-      ".ppt",
       ".pptx",
       ".txt",
       ".png",
@@ -38,7 +37,7 @@ export default function UploadZone({ onFilesSelected, className = "" }) {
 
       if (!isSupported) {
         setError(
-          `File "${f.name}" is not supported. Allowed formats: PDF, DOCX, PPT, PPTX, TXT, PNG, JPG, JPEG.`
+          `File "${f.name}" is not supported. Allowed formats: PDF, DOCX, PPTX, TXT, PNG, JPG, JPEG.`
         );
         return false;
       }
@@ -114,7 +113,7 @@ export default function UploadZone({ onFilesSelected, className = "" }) {
           {isDragging ? "Drop your files here" : "Drop your files here or click to browse"}
         </h3>
         <p className="mt-2 text-sm text-slate-500">
-          Upload research papers up to 100MB each · PDF, DOCX, PPTX, TXT, PNG, JPG, JPEG supported
+          Upload research documents up to 100MB each · PDF, DOCX, PPTX, TXT, PNG, JPG, JPEG supported
         </p>
 
         <div className="mt-6 flex flex-wrap gap-2 justify-center">
@@ -147,7 +146,7 @@ export default function UploadZone({ onFilesSelected, className = "" }) {
         <input
           type="file"
           multiple
-          accept=".pdf,.doc,.docx,.ppt,.pptx,.txt,.png,.jpg,.jpeg"
+          accept=".pdf,.docx,.pptx,.txt,.png,.jpg,.jpeg"
           onChange={handleFileInput}
           className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
         />
