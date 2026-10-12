@@ -83,6 +83,7 @@ export default function Learning() {
   const [availablePapers, setAvailablePapers] = useState([]);
   const [selectedPaperId, setSelectedPaperId] = useState("");
   const [mindmapPrompt, setMindmapPrompt] = useState("");
+  const [flashcardCount, setFlashcardCount] = useState("6");
   const [generatedCards, setGeneratedCards] = useState(null);
   const [generatedMindmap, setGeneratedMindmap] = useState(null);
   const [generatedMindmapArtifactId, setGeneratedMindmapArtifactId] = useState(null);
@@ -131,6 +132,7 @@ export default function Learning() {
       if (typeof cached.flipped === "boolean") setFlipped(cached.flipped);
       if (cached.quizAnswers && typeof cached.quizAnswers === "object") setQuizAnswers(cached.quizAnswers);
       if (cached.selectedPaperId) setSelectedPaperId(cached.selectedPaperId);
+      if (cached.flashcardCount != null) setFlashcardCount(String(cached.flashcardCount));
       if (typeof cached.mindmapPrompt === "string") setMindmapPrompt(cached.mindmapPrompt);
       if (cached.selectedMindmapNodeId) setSelectedMindmapNodeId(cached.selectedMindmapNodeId);
       if (Array.isArray(cached.collapsedMindmapNodes)) setCollapsedMindmapNodes(new Set(cached.collapsedMindmapNodes));
@@ -165,7 +167,7 @@ export default function Learning() {
         body: JSON.stringify({
           kind: "quiz",
           paper_id: paperId,
-          count: Math.max(3, Math.min(20, previousQuestions.length || 8)),
+          count: Math.max(1, Math.min(20, previousQuestions.length || 8)),
           difficulty: previousArtifact?.payload?.difficulty || "medium",
           avoid_questions: previousQuestions.map((question) => question.question).filter(Boolean).slice(0, 20),
           variation_seed: Date.now().toString(36),
@@ -186,11 +188,16 @@ export default function Learning() {
       setQuizRegenerating(false);
     }
   }
-  const generateFromPaper = async (kind) => {
+  const generateFromPaper = async (kind, requestedCount = 8) => {
     if (!selectedPaperId) { setGenerationError("Upload a paper first, then choose it here."); return; }
+    const count = Number(requestedCount);
+    if (kind === "flashcards" && (!Number.isInteger(count) || count < 1 || count > 20)) {
+      setGenerationError("Choose a whole number from 1 to 20 flashcards.");
+      return;
+    }
     setGenerating(true); setGenerationError(""); setGenerationMode(""); setGenerationNotice("");
     try {
-      const result = await apiFetch("/learning/generate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind, paper_id: selectedPaperId, count: kind === "mindmap" ? 6 : 8, prompt: kind === "mindmap" ? mindmapPrompt.trim() : "" }) });
+      const result = await apiFetch("/learning/generate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind, paper_id: selectedPaperId, count: kind === "mindmap" ? 6 : count, prompt: kind === "mindmap" ? mindmapPrompt.trim() : "" }) });
       const payload = result.artifact.payload || {};
       setGenerationMode(payload._generation_mode || "");
       setGenerationNotice(payload._generation_notice || "");
@@ -221,13 +228,14 @@ export default function Learning() {
   useEffect(() => {
     writeLearningSession({
       tab, selectedPaperId, mindmapPrompt, generatedMindmap, generatedMindmapArtifactId,
+      flashcardCount,
       selectedMindmapNodeId, collapsedMindmapNodes: [...collapsedMindmapNodes], mindmapZoom, mindmapPan,
       generatedQuiz, quizAnswers, quizNotice, generatedCards, cardOrder, cardRatings,
       retriedCards: [...retriedCards], cardIdx, flipped,
     });
   }, [tab, selectedPaperId, generatedMindmap, generatedMindmapArtifactId, selectedMindmapNodeId,
     collapsedMindmapNodes, mindmapZoom, mindmapPan, mindmapPrompt, generatedQuiz, quizAnswers, quizNotice,
-    generatedCards, cardOrder, cardRatings, retriedCards, cardIdx, flipped]);
+    generatedCards, cardOrder, cardRatings, retriedCards, cardIdx, flipped, flashcardCount]);
 
   const demoMindmapNodes = [
     { id: "center", label: "Transformer", x: 50, y: 50, color: "from-primary-500 to-accent-500", size: "lg" },
@@ -571,7 +579,10 @@ export default function Learning() {
           <textarea id="mindmap-prompt" value={mindmapPrompt} onChange={(event) => setMindmapPrompt(event.target.value)} maxLength={1000} rows={3} placeholder="Tell ScholarMind how to organize the map—for example, focus on the research problem, methods, results, and limitations." className="w-full resize-y rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700 outline-none transition placeholder:text-slate-400 focus:border-primary-400 focus:ring-2 focus:ring-primary-100" />
           <p className="text-xs text-slate-500">The map will stay grounded in the selected paper. {mindmapPrompt.length}/1000</p>
         </div>
-        <button onClick={() => generateFromPaper("flashcards")} disabled={generating || !selectedPaperId} className="rounded-lg bg-primary-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">{generating ? "Generating…" : "Generate flashcards"}</button>
+        <label htmlFor="flashcard-count" className="flex items-center gap-2 text-sm font-semibold text-slate-700">Cards
+          <input id="flashcard-count" aria-label="Number of flashcards" type="number" min="1" max="20" step="1" required value={flashcardCount} onChange={(event) => setFlashcardCount(event.target.value)} disabled={generating} className="w-20 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-normal" />
+        </label>
+        <button onClick={() => generateFromPaper("flashcards", flashcardCount)} disabled={generating || !selectedPaperId} className="rounded-lg bg-primary-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">{generating ? "Generating…" : `Generate ${flashcardCount || ""} flashcards`}</button>
         <button onClick={() => generateFromPaper("mindmap")} disabled={generating || !selectedPaperId} className="rounded-lg border border-primary-200 px-4 py-2 text-sm font-semibold text-primary-700 disabled:opacity-50">Generate mind map</button>
         {generationError && <p className="w-full text-sm text-red-600">{generationError}</p>}
         {generationMode === "source_fallback" && <p role="status" className="w-full rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-900">{generationNotice || "Gemini was unavailable; this material uses retrieved PDF passages only."}</p>}
@@ -648,17 +659,17 @@ export default function Learning() {
             </div>
           </div>
 
-          <div className="flex items-center justify-center gap-3">
+          <div className="flex flex-wrap items-center justify-center gap-3">
             <button onClick={e => { e.stopPropagation(); setFlipped(false); setCardIdx(i => Math.max(0, i - 1)); }} disabled={cardIdx === 0} className="px-6 py-3 rounded-xl border-2 border-slate-200 text-slate-600 font-bold hover:bg-slate-50 disabled:opacity-40 transition flex items-center gap-2">
               ← Previous
             </button>
-            <button onClick={() => rateCard("again")} aria-pressed={cardRatings[activeCardIdx] === "again"} className="px-5 py-3 rounded-xl bg-success-50 text-success-700 font-bold hover:bg-success-100 transition flex items-center gap-1">
+            <button type="button" onClick={() => rateCard("again")} disabled={!flipped} title={!flipped ? "Reveal the answer before rating this card" : "Show this card again once"} aria-pressed={cardRatings[activeCardIdx] === "again"} className="min-h-11 rounded-xl border border-error-100 bg-error-50 px-5 py-3 font-bold text-error-700 transition hover:bg-error-100 disabled:cursor-not-allowed disabled:opacity-50">
               ❌ Again
             </button>
-            <button onClick={() => rateCard("hard")} aria-pressed={cardRatings[activeCardIdx] === "hard"} className="px-5 py-3 rounded-xl bg-warning-50 text-warning-700 font-bold hover:bg-warning-100 transition flex items-center gap-1">
+            <button type="button" onClick={() => rateCard("hard")} disabled={!flipped} title={!flipped ? "Reveal the answer before rating this card" : "Mark this card as difficult and continue"} aria-pressed={cardRatings[activeCardIdx] === "hard"} className="min-h-11 rounded-xl border border-warning-100 bg-warning-50 px-5 py-3 font-bold text-warning-700 transition hover:bg-warning-100 disabled:cursor-not-allowed disabled:opacity-50">
               🟡 Hard
             </button>
-            <button onClick={() => rateCard("got-it")} aria-pressed={cardRatings[activeCardIdx] === "got-it"} className="px-5 py-3 rounded-xl bg-primary-50 text-primary-700 font-bold hover:bg-primary-100 transition flex items-center gap-1">
+            <button type="button" onClick={() => rateCard("got-it")} disabled={!flipped} title={!flipped ? "Reveal the answer before rating this card" : "Mark this card as mastered and continue"} aria-pressed={cardRatings[activeCardIdx] === "got-it"} className="min-h-11 rounded-xl border border-primary-100 bg-primary-50 px-5 py-3 font-bold text-primary-700 transition hover:bg-primary-100 disabled:cursor-not-allowed disabled:opacity-50">
               ✅ Got It
             </button>
             <button onClick={advanceCard} disabled={cardIdx === cardOrder.length - 1} className="px-6 py-3 rounded-xl bg-gradient-to-r from-primary-600 to-primary-500 text-white font-bold shadow-lg shadow-primary-500/25 hover:shadow-xl hover:shadow-primary-500/30 disabled:opacity-40 transition flex items-center gap-2">

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +10,12 @@ import pytesseract
 from PIL import Image
 from docx import Document
 from pptx import Presentation
+
+
+if os.name == "nt" and not shutil.which("tesseract"):
+    tesseract_path = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Tesseract-OCR" / "tesseract.exe"
+    if tesseract_path.is_file():
+        pytesseract.pytesseract.tesseract_cmd = str(tesseract_path)
 
 
 SUPPORTED_EXTENSIONS = {

@@ -1,6 +1,7 @@
 $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $candidates = @(
+    (Join-Path $PSScriptRoot ".venv-repair\Scripts\python.exe"),
     (Join-Path $repoRoot ".venv-new\Scripts\python.exe"),
     (Join-Path $repoRoot ".venv\Scripts\python.exe"),
     (Join-Path $PSScriptRoot ".venv\Scripts\python.exe")
@@ -10,7 +11,7 @@ $python = $null
 foreach ($candidate in $candidates) {
     if (-not (Test-Path $candidate)) { continue }
     try {
-        & $candidate -c "import fastapi, uvicorn, pytesseract" 2>$null
+        & $candidate -c "import fastapi, uvicorn, pytesseract, torch; torch.zeros(1)" 2>$null
         if ($LASTEXITCODE -eq 0) {
             $python = $candidate
             break

@@ -76,6 +76,8 @@ class GenerateRequest(BaseModel):
     prompt: str = Field(default="", max_length=1000)
     count: int = Field(default=6, ge=1, le=20)
     difficulty: str = Field(default="medium", pattern="^(simple|medium|hard)$")
+    avoid_questions: list[str] = Field(default_factory=list, max_length=20)
+    variation_seed: str | None = Field(default=None, max_length=64)
 
 
 class MindMapExistingNode(BaseModel):
@@ -665,12 +667,15 @@ def generate_learning(payload: GenerateRequest, user: dict[str, Any] = Depends(c
         for selected_id in paper_ids:
             hits.extend(hybrid_search(query, query_embedding, [selected_id], per_paper_limit, owner_id=user["id"]))
     else:
-        retrieval_limit = min(payload.count * 2, 20) if payload.kind == "quiz" else min(payload.count, 10)
+        retrieval_limit = min(payload.count * 2, 20) if payload.kind == "quiz" else min(max(payload.count, 6), 10) if payload.kind == "flashcards" else min(payload.count, 10)
         hits = hybrid_search(query, query_embedding, paper_ids, retrieval_limit, owner_id=user["id"])
     if not hits:
         raise HTTPException(status_code=404, detail="No text passages found for this paper")
     try:
-        content = generate_study_artifact(payload.kind, query, hits, payload.count, payload.difficulty)
+        content = generate_study_artifact(
+            payload.kind, query, hits, payload.count, payload.difficulty,
+            avoid_questions=payload.avoid_questions, variation_seed=payload.variation_seed,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     if content.get("_generation_mode") == "source_fallback":

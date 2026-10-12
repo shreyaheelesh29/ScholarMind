@@ -24,15 +24,24 @@ export default function Topbar() {
 
   useEffect(() => {
     let alive = true;
-    const refresh = () => apiFetch("/notifications").then((data) => {
-      if (alive) { setNotifications(data.notifications || []); setUnread(data.unread_count || 0); setNoticeError(""); }
-    }).catch((error) => { if (alive) setNoticeError(error.message); });
+    let refreshing = false;
+    const refresh = async () => {
+      if (refreshing || document.visibilityState !== "visible" || !localStorage.getItem("scholarmind_token")) return;
+      refreshing = true;
+      try {
+        const data = await apiFetch("/notifications");
+        if (alive) { setNotifications(data.notifications || []); setUnread(data.unread_count || 0); setNoticeError(""); }
+      } catch (error) {
+        if (alive && error.status !== 401) setNoticeError(error.message);
+      } finally { refreshing = false; }
+    };
     refresh();
-    const timer = window.setInterval(() => { if (document.visibilityState === "visible") refresh(); }, 15000);
+    const timer = window.setInterval(refresh, 60000);
+    document.addEventListener("visibilitychange", refresh);
     const syncUser = () => setUser(getSessionUser());
     window.addEventListener("scholarmind-user-updated", syncUser);
     apiFetch("/settings").then((settings) => { if (alive) { setTheme(settings.theme || "system"); applyTheme(settings.theme || "system"); } }).catch(() => {});
-    return () => { alive = false; window.clearInterval(timer); window.removeEventListener("scholarmind-user-updated", syncUser); };
+    return () => { alive = false; window.clearInterval(timer); document.removeEventListener("visibilitychange", refresh); window.removeEventListener("scholarmind-user-updated", syncUser); };
   }, []);
 
   const toggleTheme = async () => {

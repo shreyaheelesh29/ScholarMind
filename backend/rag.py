@@ -182,10 +182,11 @@ def answer(question: str, hits: list[dict[str, Any]], history: list[dict[str, st
     """Use an OpenAI-compatible API when configured; otherwise never fabricate a response."""
     if not hits:
         return "I couldn’t find relevant text in the selected papers. Try asking about a specific term, section, or finding, or check that the PDF finished indexing."
-    api_key = os.getenv("LLM_API_KEY")
-    if not api_key:
-        return _extractive_answer(hits)
+    api_key = os.getenv("LLM_API_KEY", "")
     base_url = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+    local_ollama = _is_local_ollama(base_url)
+    if not api_key and not local_ollama:
+        return _extractive_answer(hits)
     model = os.getenv("LLM_MODEL", "gpt-4o-mini")
     messages = [{"role": "system", "content": (
         "You are ScholarMind, a careful academic research assistant. Answer the user's current question directly and clearly, "
@@ -213,7 +214,8 @@ def answer(question: str, hits: list[dict[str, Any]], history: list[dict[str, st
 
 
 def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], count: int = 8,
-                            difficulty: str = "medium") -> dict[str, Any]:
+                            difficulty: str = "medium", avoid_questions: list[str] | None = None,
+                            variation_seed: str | None = None) -> dict[str, Any]:
     """Generate a structured learning/research artifact grounded in retrieved passages."""
     if not hits:
         raise ValueError("No relevant paper passages were found. Try a more specific topic or re-upload the PDF.")
@@ -243,19 +245,21 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
     else:
         raise ValueError("Unsupported study artifact type")
 
-    api_key = os.getenv("LLM_API_KEY")
-    if not api_key:
+    api_key = os.getenv("LLM_API_KEY", "")
+    base_url = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+    local_ollama = _is_local_ollama(base_url)
+    if not api_key and not local_ollama:
         fallback_data["_generation_mode"] = "source_fallback"
         fallback_data["_generation_notice"] = ("AI generation is not configured. No quiz, flashcards, or mind map were fabricated; configure an AI provider and generate again."
             if kind in {"quiz", "flashcards", "mindmap"} else "AI generation is not configured. This is extracted source material, not a generated " + kind.replace("_", " ") + ".")
         return fallback_data
-    base_url = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/")
-    local_ollama = _is_local_ollama(base_url)
     compact_study_kind = kind in {"flashcards", "mindmap", "quiz"}
-    generation_count = (min(count, 20) if kind == "quiz" else
-                       (min(count, 3) if local_ollama and compact_study_kind else min(count, 10)))
+    generation_count = min(count, 20) if kind in {"quiz", "flashcards"} else (
+        min(count, 3) if local_ollama and compact_study_kind else min(count, 10)
+    )
     source_hits = (hits[:min(10, max(5, generation_count))] if local_ollama and kind == "quiz" else
                    hits[:6] if local_ollama and kind == "mindmap" else
+                   hits[:min(8, max(3, generation_count))] if local_ollama and kind == "flashcards" else
                    hits[:3] if local_ollama and compact_study_kind else hits)
     if kind == "mindmap":
         shared = (f"Use only the supplied paper passages. Focus requested: {prompt}. "
@@ -263,7 +267,9 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
                   "Choose concise labels using the paper's own terminology. Return JSON only, with no markdown. "
                   "Return only nodes with id and label, plus edges with source, target, and label; ScholarMind will attach page citations and exact evidence from the PDF.")
     else:
-        item_count = f"Generate exactly {generation_count} distinct questions. " if kind == "quiz" else f"Generate up to {generation_count} useful items. "
+        item_count = (f"Generate exactly {generation_count} distinct questions. " if kind == "quiz" else
+                      f"Generate exactly {generation_count} useful, distinct flashcards. " if kind == "flashcards" else
+                      f"Generate up to {generation_count} useful items. ")
         difficulty_guidance = {
             "simple": "Use direct recall of clearly stated definitions, terms, and facts; avoid multi-step inference.",
             "medium": "Test understanding or application and require one reasoning step about a method, result, or concept.",
@@ -273,14 +279,21 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
         shared = (f"Use only the paper passages below. Focus requested: {prompt}. {item_count} "
                   "Each page must be one of the page numbers shown in the sources. If evidence is insufficient, omit the item. "
                   "Do not copy a passage verbatim as a question; paraphrase and test understanding. Return JSON only, with no markdown." + quiz_level)
+        if kind in {"quiz", "flashcards"} and avoid_questions:
+            already_asked = [question.strip()[:160] for question in avoid_questions[-8:] if question.strip()]
+            if already_asked:
+                label = "previous quiz questions" if kind == "quiz" else "previous flashcard prompts"
+                shared += f" Do not repeat these {label}; use different paper-supported concepts: " + json.dumps(already_asked, ensure_ascii=False)
+        if kind == "quiz" and variation_seed:
+            shared += f" Create a fresh variation set ({variation_seed}); change the tested concepts and wording from prior attempts."
     analysis_kinds = {"comparison", "literature_review", "research_gap", "research_ideas"}
     if kind in analysis_kinds:
         shared = (f"Use only the supplied paper passages. Focus requested: {prompt}. "
                   "Each passage has an ID such as [S1]. Cite evidence using only those IDs; do not write filenames or page numbers. "
                   "If evidence is insufficient, omit the unsupported claim. Return JSON only, with no markdown.")
     task_instructions = {
-        "quiz": "Create multiple-choice questions that test distinct, important concepts from this paper. Every question must be answerable from the cited passage. Provide exactly four different, plausible options; exactly one is correct. `answer` is the zero-based index (0-3) of that correct option. Explain the answer in one short sentence grounded in the paper.",
-        "flashcards": "Create study flashcards, one concept per card. `front` must be a direct, self-contained question. `back` must state the correct answer in one concise sentence, adding a key detail only when supported. Avoid vague prompts and duplicated concepts.",
+        "quiz": "Create multiple-choice questions that test distinct, important concepts from this paper. Every question must be answerable from the cited passage. Provide exactly four different, plausible options; exactly one is correct. `answer` is the zero-based index (0-3) of that correct option. Explain the answer in one short sentence grounded in the paper, no more than 20 words. Keep the question under 22 words and each option under 10 words. Return only the requested JSON.",
+        "flashcards": "Create study flashcards, one concept per card. `front` must be a direct, self-contained question under 22 words. `back` must state the correct answer in one concise sentence under 25 words, adding a key detail only when supported. Avoid vague prompts and duplicated concepts. Return only the requested JSON.",
         "mindmap": "Return a complete map, never only a title or root: exactly one root plus at least four distinct, paper-specific concepts and four or more labeled links. Use concise concept labels of 2-8 words. For every non-root label, include at least one specific content word that appears in the supplied passages; prefer the paper's own terminology over paraphrases. Do not add page or quote fields; those are matched to the source by the application. Every node must connect to the root.",
         "comparison": "Compare only the selected papers represented in SOURCES. Cover shared and differing objectives, methods, data/evaluation, results, and limitations where the text supports them. Each paper_findings entry must include its exact source_id such as S1. Do not invent scores or rank papers; state when a criterion is not reported.",
         "literature_review": "Write a concise thematic synthesis across the selected uploaded papers, not a list of summaries. Each section must cite one or more source IDs such as S1 from the supplied passages. Describe agreements, disagreements, and trends only when supported.",
@@ -298,8 +311,8 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
     if local_ollama:
         # CPU-bound local models decode slowly. Three concise, source-grounded
         # items keep normal study-tool requests within a practical wait time.
-        generation_tokens.update({"flashcards": 320, "mindmap": 450,
-                                  "quiz": min(5000, max(1200, generation_count * 220))})
+        generation_tokens.update({"flashcards": min(5000, max(700, generation_count * 190)), "mindmap": 450,
+                                  "quiz": min(5000, max(900, generation_count * 260))})
     context_chars = (({"simple": 300, "medium": 400, "hard": 500}.get(difficulty, 400)
                       if kind == "quiz" else 750 if kind == "mindmap" else 500)
                      if local_ollama else 1300) if kind in {"flashcards", "mindmap", "quiz", "visualization", "viva"} else 1800
@@ -307,6 +320,38 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
             {"role": "system", "content": "You are a precise academic learning assistant. Use only supplied source passages and return valid JSON."},
             {"role": "user", "content": f"{instruction}\n\nSOURCES:\n{_analysis_context(source_hits) if kind in analysis_kinds else _context(source_hits, max_chars=context_chars)}"}
         ]
+    if local_ollama and kind in {"quiz", "flashcards"} and generation_count > 2:
+        # Small local models can stall on a long structured response. Generate
+        # bounded chunks, carrying prior quiz questions forward to avoid repeats.
+        item_key = "questions" if kind == "quiz" else "cards"
+        combined: list[dict[str, Any]] = []
+        prior_questions = list(avoid_questions or [])
+        for offset in range(0, generation_count, 2):
+            batch_count = min(2, generation_count - offset)
+            batch = generate_study_artifact(
+                kind, prompt, hits, batch_count, difficulty,
+                avoid_questions=prior_questions,
+                variation_seed=f"{variation_seed or 'local'}-{offset // 3 + 1}",
+            )
+            batch_items = batch.get(item_key)
+            if batch.get("_generation_mode") != "ai" or not isinstance(batch_items, list):
+                return {**fallback_data, "_generation_mode": "source_fallback",
+                        "_generation_notice": batch.get("_generation_notice", "The model could not complete the requested set. Try fewer items.")}
+            combined.extend(batch_items)
+            if kind == "quiz":
+                prior_questions.extend(item.get("question", "") for item in batch_items if isinstance(item, dict))
+            else:
+                prior_questions.extend(item.get("front", "") for item in batch_items if isinstance(item, dict))
+        item_prompts = [str(item.get("question" if kind == "quiz" else "front", "")).strip().casefold() for item in combined]
+        if len(set(item_prompts)) != len(item_prompts):
+            return {**fallback_data, "_generation_mode": "source_fallback",
+                    "_generation_notice": f"The model repeated a {('quiz question' if kind == 'quiz' else 'flashcard prompt')}. Try again or request a smaller set for more variety."}
+        result: dict[str, Any] = {item_key: combined}
+        if kind == "quiz":
+            result["difficulty"] = difficulty
+        _validate_study_artifact(kind, result, source_hits)
+        result["_generation_mode"] = "ai"
+        return result
     try:
         content = _chat_request(base_url, model, messages,
             timeout=120 if local_ollama else 45,
@@ -327,6 +372,34 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
             fallback_data["_generation_notice"] = "The AI model returned an unusable response. No quiz, flashcards, or mind map were fabricated; try again."
             return fallback_data
         result = json.loads(content[start:end + 1])
+        if kind == "flashcards":
+            cards = result.get("cards") if isinstance(result, dict) else None
+            if not isinstance(cards, list):
+                raise ValueError("Flashcard response did not contain a cards list")
+            if len(cards) < generation_count:
+                repair_messages = messages + [
+                    {"role": "assistant", "content": content[:12000]},
+                    {"role": "user", "content": (
+                        f"Return exactly {generation_count} complete, distinct flashcards. The previous answer had only "
+                        f"{len(cards)}. Keep its supported cards, add new concepts grounded in SOURCES, and return the full corrected JSON. "
+                        f"Match this structure: {shape}"
+                    )},
+                ]
+                repaired = _chat_request(
+                    base_url, model, repair_messages,
+                    timeout=120 if local_ollama else 45,
+                    max_tokens=generation_tokens.get(kind, 1600),
+                    temperature=0.35, json_mode=True, attempts=1,
+                )
+                repair_start, repair_end = repaired.find("{"), repaired.rfind("}")
+                if repair_start < 0 or repair_end < repair_start:
+                    raise ValueError("The model returned fewer flashcards than requested and could not repair the deck")
+                result = json.loads(repaired[repair_start:repair_end + 1])
+                cards = result.get("cards") if isinstance(result, dict) else None
+                if not isinstance(cards, list) or len(cards) < generation_count:
+                    actual_count = len(cards) if isinstance(cards, list) else 0
+                    raise ValueError(f"The model generated {actual_count} of {generation_count} requested flashcards. Try a smaller count or another topic.")
+            result["cards"] = cards[:generation_count]
         if kind == "quiz":
             questions = result.get("questions") if isinstance(result, dict) else None
             if not isinstance(questions, list):
@@ -357,6 +430,27 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
                     actual_count = len(questions) if isinstance(questions, list) else 0
                     raise ValueError(f"The model generated {actual_count} of {generation_count} requested questions. Try a smaller count or another topic.")
             result["questions"] = questions[:generation_count]
+            # Some local models ignore the requested zero-based convention and
+            # return A-D (or the correct option text). Normalize unambiguous
+            # forms before validation while keeping integer 0-3 semantics.
+            for question in result["questions"]:
+                if not isinstance(question, dict):
+                    continue
+                answer = question.get("answer")
+                options = question.get("options")
+                if isinstance(answer, str) and isinstance(options, list):
+                    label = answer.strip().upper().rstrip(".)")
+                    if label in {"A", "B", "C", "D"}:
+                        question["answer"] = ord(label) - ord("A")
+                    else:
+                        matching = [i for i, option in enumerate(options)
+                                    if isinstance(option, str) and option.strip().casefold() == answer.strip().casefold()]
+                        if len(matching) == 1:
+                            question["answer"] = matching[0]
+                elif type(answer) is int and answer == 4:
+                    # 4 is the only out-of-range integer that unambiguously
+                    # means the fourth option in a one-based A-D convention.
+                    question["answer"] = 3
             result["difficulty"] = difficulty
         if kind == "mindmap":
             _attach_mindmap_evidence(result, source_hits)
@@ -848,7 +942,7 @@ def _generation_failure_reason(exc: Exception, api_key: str, base_url: str, mode
     provider = f"Local Ollama ({model})" if local_ollama else f"AI provider ({model})"
     if isinstance(exc, (TimeoutError, socket.timeout)):
         if local_ollama:
-            return f"{provider} exceeded the 120-second response limit. Local CPU inference is slow; retry after it is warm or use a smaller model such as qwen3:1.7b."
+            return f"{provider} exceeded the local response limit. Try requesting fewer questions or flashcards, then retry."
         return f"{provider} timed out. Check your connection and try again."
     if isinstance(exc, urllib.error.HTTPError):
         if exc.code == 503:
@@ -860,7 +954,10 @@ def _generation_failure_reason(exc: Exception, api_key: str, base_url: str, mode
             detail = body.get("error", {}).get("message", "") if isinstance(body, dict) else ""
         except Exception:
             detail = ""
-        detail = str(detail).replace(api_key, "[hidden]").strip()
+        detail = str(detail)
+        if api_key:
+            detail = detail.replace(api_key, "[hidden]")
+        detail = detail.strip()
         if not detail:
             detail = "The provider did not give details."
         return f"{provider} HTTP {exc.code}: {detail[:260]}"

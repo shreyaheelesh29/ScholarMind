@@ -60,6 +60,9 @@ export async function apiFetch(path, options = {}) {
     const detail = readableError(result?.detail ?? result?.message ?? result?.error ?? result);
     const error = new Error(detail || `Request failed (${response.status})`);
     error.status = response.status;
+    if (response.status === 401 && token && !path.startsWith("/auth/") && localStorage.getItem("scholarmind_token") === token) {
+      clearSession();
+    }
     throw error;
   }
   return result;
