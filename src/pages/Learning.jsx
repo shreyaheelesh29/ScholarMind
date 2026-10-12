@@ -585,7 +585,7 @@ export default function Learning() {
         <button onClick={() => generateFromPaper("flashcards", flashcardCount)} disabled={generating || !selectedPaperId} className="rounded-lg bg-primary-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">{generating ? "Generating…" : `Generate ${flashcardCount || ""} flashcards`}</button>
         <button onClick={() => generateFromPaper("mindmap")} disabled={generating || !selectedPaperId} className="rounded-lg border border-primary-200 px-4 py-2 text-sm font-semibold text-primary-700 disabled:opacity-50">Generate mind map</button>
         {generationError && <p className="w-full text-sm text-red-600">{generationError}</p>}
-        {generationMode === "source_fallback" && <p role="status" className="w-full rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-900">{generationNotice || "Gemini was unavailable; this material uses retrieved PDF passages only."}</p>}
+        {generationNotice && <p role="status" className="w-full rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-900">{generationNotice}</p>}
         {generationMode === "ai" && <p className="w-full text-sm font-medium text-emerald-700">AI-generated from the selected PDF.</p>}
       </div>
 

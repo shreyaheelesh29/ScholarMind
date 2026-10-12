@@ -326,31 +326,59 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
         item_key = "questions" if kind == "quiz" else "cards"
         combined: list[dict[str, Any]] = []
         prior_questions = list(avoid_questions or [])
+        def prompt_key(value: Any) -> str:
+            return " ".join(re.findall(r"[a-z0-9]+", str(value or "").casefold()))
+
+        used_prompts = {prompt_key(question) for question in prior_questions if prompt_key(question)}
         for offset in range(0, generation_count, 2):
             batch_count = min(2, generation_count - offset)
-            batch = generate_study_artifact(
-                kind, prompt, hits, batch_count, difficulty,
-                avoid_questions=prior_questions,
-                variation_seed=f"{variation_seed or 'local'}-{offset // 3 + 1}",
-            )
-            batch_items = batch.get(item_key)
-            if batch.get("_generation_mode") != "ai" or not isinstance(batch_items, list):
-                return {**fallback_data, "_generation_mode": "source_fallback",
-                        "_generation_notice": batch.get("_generation_notice", "The model could not complete the requested set. Try fewer items.")}
-            combined.extend(batch_items)
-            if kind == "quiz":
-                prior_questions.extend(item.get("question", "") for item in batch_items if isinstance(item, dict))
-            else:
-                prior_questions.extend(item.get("front", "") for item in batch_items if isinstance(item, dict))
-        item_prompts = [str(item.get("question" if kind == "quiz" else "front", "")).strip().casefold() for item in combined]
-        if len(set(item_prompts)) != len(item_prompts):
-            return {**fallback_data, "_generation_mode": "source_fallback",
-                    "_generation_notice": f"The model repeated a {('quiz question' if kind == 'quiz' else 'flashcard prompt')}. Try again or request a smaller set for more variety."}
+            missing = batch_count
+            retry = 0
+            while missing and retry < 3:
+                batch = generate_study_artifact(
+                    kind, prompt, hits, missing, difficulty,
+                    avoid_questions=prior_questions,
+                    variation_seed=f"{variation_seed or 'local'}-{offset // 2 + 1}-retry-{retry + 1}",
+                )
+                batch_items = batch.get(item_key)
+                if batch.get("_generation_mode") != "ai" or not isinstance(batch_items, list):
+                    if not combined:
+                        return {**fallback_data, "_generation_mode": "source_fallback",
+                                "_generation_notice": batch.get("_generation_notice", "The model could not complete the requested set. Try fewer items.")}
+                    break
+
+                for item in batch_items:
+                    if not isinstance(item, dict):
+                        continue
+                    item_prompt = item.get("question" if kind == "quiz" else "front", "")
+                    normalized_prompt = prompt_key(item_prompt)
+                    if not normalized_prompt or normalized_prompt in used_prompts:
+                        continue
+                    combined.append(item)
+                    used_prompts.add(normalized_prompt)
+                    prior_questions.append(str(item_prompt))
+                    missing -= 1
+                    if missing == 0:
+                        break
+                retry += 1
+
+            if missing:
+                # Repetition is a quality issue, not a reason to reject an
+                # otherwise useful deck with HTTP 503. Return only validated,
+                # distinct items and tell the user how many were available.
+                break
+
         result: dict[str, Any] = {item_key: combined}
         if kind == "quiz":
             result["difficulty"] = difficulty
         _validate_study_artifact(kind, result, source_hits)
         result["_generation_mode"] = "ai"
+        if len(combined) < generation_count:
+            noun = "flashcards" if kind == "flashcards" else "questions"
+            result["_generation_notice"] = (
+                f"Generated {len(combined)} distinct {noun} from the available paper evidence; "
+                f"you requested {generation_count}. Try a smaller set or a different focus for more variety."
+            )
         return result
     try:
         content = _chat_request(base_url, model, messages,
