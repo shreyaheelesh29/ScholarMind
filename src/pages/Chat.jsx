@@ -33,13 +33,13 @@ export default function Chat() {
       query: "Explain the research methodology used in this paper in detail. What experimental setup, datasets, and evaluation metrics were used?",
     },
     {
-      label: "Compare with BERT paper",
+      label: "Compare paper approaches",
       icon: (
         <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 5a1 1 0 011-1h14a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM4 13a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H5a1 1 0 01-1-1v-6zM16 13a1 1 0 011-1h2a1 1 0 011 1v6a1 1 0 01-1 1h-2a1 1 0 01-1-1v-6z" />
         </svg>
       ),
-      query: "Compare this paper with the BERT paper (Devlin et al., 2019). What are the key differences in architecture, training approach, and use cases?",
+      query: "Compare the selected papers' research goals, methods, datasets, and reported results. Cite the page for each comparison and say when the evidence is not comparable.",
     },
     {
       label: "Find limitations",
@@ -48,13 +48,12 @@ export default function Chat() {
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
         </svg>
       ),
-      query: "Identify and discuss the limitations and weaknesses of this research. What aspects could be improved in future work?",
+      query: "What limitations or future-work items do the selected papers explicitly state? Quote or closely summarize the evidence and cite the page. If none appear in the retrieved passages, say so.",
     },
   ];
 
   const handleSuggestionClick = (query) => {
-    // In a real app, this would inject the query into ChatWindow's input and trigger send
-    console.log("Quick suggestion clicked:", query);
+    window.dispatchEvent(new CustomEvent("scholarmind-chat-suggestion", { detail: query }));
   };
 
   return (

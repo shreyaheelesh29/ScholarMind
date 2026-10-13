@@ -102,8 +102,8 @@ export default function ResearchIdeas() {
   return <div className="mx-auto max-w-6xl space-y-6 animate-fade-in">
     <header className="rounded-2xl border border-indigo-100 bg-gradient-to-br from-indigo-50 via-white to-white p-6 sm:p-8">
       <p className="text-sm font-semibold text-indigo-700">Turn paper gaps into next steps</p>
-      <h1 className="mt-1 text-3xl font-bold text-slate-900">Research Ideas</h1>
-      <p className="mt-2 max-w-3xl text-slate-600">Build focused, practical proposal drafts from the evidence in your library. Choose a few related papers, set your constraints, then follow each source link back to the relevant PDF page.</p>
+      <h1 className="mt-1 text-3xl font-bold text-slate-900">Research Question Builder</h1>
+      <p className="mt-2 max-w-3xl text-slate-600">Turn evidence-backed gaps into testable questions and practical proposal drafts. Choose related papers, set your constraints, and follow sources back to the exact PDF pages. Suggested questions are candidates, not verified novel contributions.</p>
     </header>
 
     <section aria-labelledby="idea-settings-title" className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">

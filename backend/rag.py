@@ -13,8 +13,15 @@ import urllib.error
 import urllib.request
 import uuid
 from functools import lru_cache
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+
+from dotenv import load_dotenv
+
+# Keep provider configuration available even when this module is imported outside
+# main.py. Do not override variables explicitly supplied by the process.
+load_dotenv(Path(__file__).with_name(".env"), override=False)
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +100,28 @@ def _open_with_retries(request: urllib.request.Request, timeout: int, attempts: 
 def _is_local_ollama(base_url: str) -> bool:
     parsed = urlparse(base_url)
     return parsed.hostname in {"localhost", "127.0.0.1", "::1"} and parsed.port == 11434
+
+
+def ai_provider_status() -> dict[str, str | bool]:
+    """Resolve the one shared provider configuration used by all AI features."""
+    base_url = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+    model = os.getenv("LLM_MODEL", "gpt-4o-mini")
+    local_ollama = _is_local_ollama(base_url)
+    configured = local_ollama or bool(os.getenv("LLM_API_KEY", "").strip())
+    return {
+        "configured": configured,
+        "provider": "ollama" if local_ollama else "openai-compatible",
+        "model": model,
+        "base_url": base_url,
+    }
+
+
+def _provider_settings() -> tuple[str, str, bool, str]:
+    status = ai_provider_status()
+    api_key = os.getenv("LLM_API_KEY", "").strip()
+    base_url = str(status["base_url"])
+    model = str(status["model"])
+    return api_key, base_url, bool(status["provider"] == "ollama"), model
 
 
 def _chat_request(base_url: str, model: str, messages: list[dict[str, str]], timeout: int,
@@ -182,12 +211,9 @@ def answer(question: str, hits: list[dict[str, Any]], history: list[dict[str, st
     """Use an OpenAI-compatible API when configured; otherwise never fabricate a response."""
     if not hits:
         return "I couldn’t find relevant text in the selected papers. Try asking about a specific term, section, or finding, or check that the PDF finished indexing."
-    api_key = os.getenv("LLM_API_KEY", "")
-    base_url = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/")
-    local_ollama = _is_local_ollama(base_url)
+    api_key, base_url, local_ollama, model = _provider_settings()
     if not api_key and not local_ollama:
         return _extractive_answer(hits)
-    model = os.getenv("LLM_MODEL", "gpt-4o-mini")
     messages = [{"role": "system", "content": (
         "You are ScholarMind, a careful academic research assistant. Answer the user's current question directly and clearly, "
         "using only the supplied paper excerpts for claims about the papers. Cite each paper-based factual claim with the matching "
@@ -228,8 +254,8 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
     elif kind == "quiz":
         fallback_data = {"questions": []}
         shape = '{"questions":[{"question":"A clear question testing understanding, not a copied sentence","options":["Plausible answer A","Plausible answer B","Plausible answer C","Plausible answer D"],"answer":0,"explanation":"Why this is correct, grounded in the paper","page":1}]}'
-    elif kind in {"summary", "report", "ppt_outline", "viva", "literature_review", "visualization", "comparison", "research_gap", "research_ideas"}:
-        field = {"summary": "summary", "report": "sections", "ppt_outline": "slides", "viva": "questions", "literature_review": "sections", "visualization": "visualizations", "comparison": "comparisons", "research_gap": "gaps", "research_ideas": "ideas"}[kind]
+    elif kind in {"summary", "report", "ppt_outline", "viva", "literature_review", "visualization", "comparison", "research_gap", "research_ideas", "reading_guide", "method_extraction"}:
+        field = {"summary": "summary", "report": "sections", "ppt_outline": "slides", "viva": "questions", "literature_review": "sections", "visualization": "visualizations", "comparison": "comparisons", "research_gap": "gaps", "research_ideas": "ideas", "reading_guide": "sections", "method_extraction": "items"}[kind]
         fallback_data = {field: [{"title": h["section"], "content": h["content"][:1400], "page": h["page_number"], "speaker_notes": h["content"][:500] if kind == "ppt_outline" else None} for h in hits[:count]]}
         shape = {
             "summary": '{"summary":"...", "key_points":[{"title":"...","content":"...","page":1}]}',
@@ -241,13 +267,13 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
             "comparison": '{"comparisons":[{"criterion":"Methodology","paper_findings":[{"source_id":"S1","finding":"..."}],"synthesis":"Similarities and differences supported by the cited findings."}]}',
             "research_gap": '{"gaps":[{"title":"...","evidence":"What the selected papers state or omit","why_it_matters":"...","proposed_direction":"...","sources":[{"source_id":"S1"}]}]}',
             "research_ideas": '{"ideas":[{"title":"...","research_question":"...","motivation":"Gap evidenced in selected papers...","methodology":"...","evaluation":"...","risks":"...","sources":[{"source_id":"S1"}]}]}',
+            "reading_guide": '{"sections":[{"title":"...","what_to_read_for":"...","key_points":["..."],"page":1}]}',
+            "method_extraction": '{"items":[{"category":"Dataset","finding":"...","page":1}]}',
         }[kind]
     else:
         raise ValueError("Unsupported study artifact type")
 
-    api_key = os.getenv("LLM_API_KEY", "")
-    base_url = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/")
-    local_ollama = _is_local_ollama(base_url)
+    api_key, base_url, local_ollama, model = _provider_settings()
     if not api_key and not local_ollama:
         fallback_data["_generation_mode"] = "source_fallback"
         fallback_data["_generation_notice"] = ("AI generation is not configured. No quiz, flashcards, or mind map were fabricated; configure an AI provider and generate again."
@@ -299,14 +325,16 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
         "literature_review": "Write a concise thematic synthesis across the selected uploaded papers, not a list of summaries. Each section must cite one or more source IDs such as S1 from the supplied passages. Describe agreements, disagreements, and trends only when supported.",
         "research_gap": "Infer only cautious candidate gaps from explicit limitations, future-work statements, disagreements, or topics absent in the supplied excerpts. Do not claim a gap is novel or absent from all research. Explain the evidence and cite source IDs such as S1. If evidence is insufficient, return an empty gaps array.",
         "research_ideas": "Propose feasible candidate ideas motivated by the supplied paper evidence and stated gaps. Clearly label them as proposals, not proven novel contributions. Include a testable question, method, evaluation, risks, and source IDs such as S1. Do not invent datasets or results.",
+        "reading_guide": "Create a concise reading guide to the selected paper. Prioritize its research question, contributions, methods, results, limitations, and conclusion. Every section must point to a page represented in the supplied passages. Do not invent section headings that are not supported.",
+        "method_extraction": "Extract only reported study details: methodology/research design, datasets or participants, baselines, evaluation metrics, experimental setup, and stated limitations. Use one item per reported detail, include a valid source page, and write 'Not reported in retrieved passages' for missing categories only if useful. Never infer sample sizes or metrics.",
     }
     instruction = f"{shared} {task_instructions.get(kind, 'Create concise, useful study material grounded in the sources.')} Match this structure: {shape}"
-    model = os.getenv("LLM_MODEL", "gpt-4o-mini")
     generation_tokens = {
         "flashcards": 900, "mindmap": 1000, "quiz": 1400,
         "visualization": 1000, "viva": 1200, "summary": 1200,
         "report": 1500, "ppt_outline": 1500, "literature_review": 1700,
         "comparison": 1600, "research_gap": 1500, "research_ideas": 1700,
+        "reading_guide": 1300, "method_extraction": 1400,
     }
     if local_ollama:
         # CPU-bound local models decode slowly. Three concise, source-grounded
@@ -483,14 +511,62 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
         if kind == "mindmap":
             _attach_mindmap_evidence(result, source_hits)
         _validate_study_artifact(kind, result, source_hits)
+        if kind == "research_gap" and not result.get("gaps"):
+            return _research_gap_source_review(source_hits)
         result["_generation_mode"] = "ai"
         return result
     except Exception as exc:
         # A model/provider response must not prevent source-based study material from being saved.
         logger.warning("LLM study generation failed; using retrieved paper content instead", exc_info=True)
+        if kind == "research_gap" and isinstance(exc, (ValueError, TypeError, KeyError)):
+            return _research_gap_source_review(source_hits)
         fallback_data["_generation_mode"] = "source_fallback"
         fallback_data["_generation_notice"] = _generation_failure_reason(exc, api_key, base_url, model)
         return fallback_data
+
+
+def _research_gap_source_review(hits: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return exact passages for manual review when the model can't validate gaps."""
+    indicators = (
+        "limitation", "future work", "future research", "unresolved", "open question",
+        "remain unclear", "remains unclear", "not address", "not explore", "further study",
+        "however", "challenge", "lack of", "not yet",
+    )
+    ranked_hits = sorted(
+        enumerate(hits),
+        key=lambda pair: (
+            sum(term in str(pair[1].get("content", "")).casefold() for term in indicators),
+            -pair[0],
+        ),
+        reverse=True,
+    )
+    passages = []
+    seen = set()
+    for _, hit in ranked_hits:
+        excerpt = re.sub(r"\s+", " ", str(hit.get("content", ""))).strip()
+        paper = str(hit.get("filename", "Selected paper"))
+        page = int(hit.get("page_number", 1))
+        identity = (paper, page, excerpt)
+        if not excerpt or identity in seen:
+            continue
+        seen.add(identity)
+        passages.append({
+            "title": str(hit.get("section") or "Retrieved passage to review"),
+            "paper": paper,
+            "page": page,
+            "excerpt": excerpt[:1200],
+        })
+        if len(passages) == 8:
+            break
+    return {
+        "gaps": [],
+        "review_passages": passages,
+        "_generation_mode": "source_review",
+        "_generation_notice": (
+            "The model could not produce a research gap that passed source validation. "
+            "These retrieved excerpts are leads to inspect manually, not confirmed research gaps."
+        ),
+    }
 
 
 def _attach_mindmap_evidence(result: Any, hits: list[dict[str, Any]]) -> None:
@@ -664,10 +740,7 @@ def expand_mindmap_node(node_id: str, node_label: str, breadcrumb: list[str], co
     """Generate three source-cited child concepts for any selected map node."""
     if not hits:
         raise ValueError("No relevant text was found for this concept in the selected paper")
-    base_url = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/")
-    api_key = os.getenv("LLM_API_KEY", "")
-    model = os.getenv("LLM_MODEL", "gpt-4o-mini")
-    local_ollama = _is_local_ollama(base_url)
+    api_key, base_url, local_ollama, model = _provider_settings()
     if not api_key and not local_ollama:
         raise ValueError("Configure an AI model before expanding mind-map branches")
 
@@ -962,6 +1035,29 @@ def _validate_study_artifact(kind: str, result: Any, hits: list[dict[str, Any]])
                     item["sources"] = references
                     item.pop("source_ids", None)
                 check_sources(item.get("sources"))
+    elif kind in {"reading_guide", "method_extraction"}:
+        field = "sections" if kind == "reading_guide" else "items"
+        items = result.get(field)
+        if not isinstance(items, list) or not items:
+            raise ValueError(f"The {kind.replace('_', ' ')} did not contain any usable entries")
+        for item in items:
+            if not isinstance(item, dict):
+                raise ValueError("Each extracted entry must be a JSON object")
+            if kind == "reading_guide":
+                if not isinstance(item.get("title"), str) or not item["title"].strip():
+                    raise ValueError("Each reading guide section needs a title")
+                if not isinstance(item.get("what_to_read_for"), str) or len(item["what_to_read_for"].strip()) < 8:
+                    raise ValueError("Each reading guide section needs a useful purpose")
+                if not isinstance(item.get("key_points", []), list):
+                    raise ValueError("Reading guide key points must be a list")
+                evidence_text = " ".join([item["title"], item["what_to_read_for"], *map(str, item.get("key_points", []))])
+            else:
+                if not isinstance(item.get("category"), str) or not item["category"].strip():
+                    raise ValueError("Each method extraction needs a category")
+                if not isinstance(item.get("finding"), str) or len(item["finding"].strip()) < 8:
+                    raise ValueError("Each extracted method or dataset detail needs a description")
+                evidence_text = f"{item['category']} {item['finding']}"
+            resolve_citation_page(item, evidence_text, kind.replace("_", " ").title())
 
 
 def _generation_failure_reason(exc: Exception, api_key: str, base_url: str, model: str) -> str:
@@ -979,13 +1075,20 @@ def _generation_failure_reason(exc: Exception, api_key: str, base_url: str, mode
             return f"{provider} rate limit reached (HTTP 429). Wait for the limit to reset, or check the provider's usage and billing page."
         try:
             body = json.loads(exc.read().decode("utf-8", errors="replace"))
-            detail = body.get("error", {}).get("message", "") if isinstance(body, dict) else ""
+            provider_error = body.get("error", "") if isinstance(body, dict) else ""
+            detail = (provider_error.get("message", "") if isinstance(provider_error, dict)
+                      else provider_error if isinstance(provider_error, str) else "")
         except Exception:
             detail = ""
-        detail = str(detail)
-        if api_key:
-            detail = detail.replace(api_key, "[hidden]")
+        detail = _redact_api_key(str(detail), api_key)
         detail = detail.strip()
+        if "out of memory" in detail.lower() or "failed to allocate" in detail.lower():
+            if model.strip().lower() == "qwen3:0.6b":
+                return (f"{provider} could not allocate memory for the already-small qwen3:0.6b model. "
+                        "Quit and reopen Ollama, then retry. If it still fails after restarting your Mac, "
+                        "use a remote AI provider; reducing the flashcard count will not fix model loading.")
+            return (f"{provider} ran out of available memory while loading the model. Close memory-heavy apps "
+                    "and retry, or use a smaller Ollama model such as qwen3:0.6b.")
         if not detail:
             detail = "The provider did not give details."
         return f"{provider} HTTP {exc.code}: {detail[:260]}"
@@ -995,5 +1098,13 @@ def _generation_failure_reason(exc: Exception, api_key: str, base_url: str, mode
         return f"Could not reach {provider}. Check internet access and try again."
     if isinstance(exc, (json.JSONDecodeError, KeyError, IndexError, TypeError)):
         return f"{provider} returned an unexpected response format. Try again; if it repeats, check the backend log."
-    reason = str(exc).replace(api_key, "[hidden]").strip()
+    reason = _redact_api_key(str(exc), api_key).strip()
     return f"{provider} response did not pass validation: {reason[:220] or type(exc).__name__}."
+
+
+def _redact_api_key(text: str, api_key: str) -> str:
+    """Redact a real credential without corrupting text when no key is configured."""
+    secret = api_key.strip()
+    # Short strings are common substrings, not usable provider credentials; replacing
+    # one-character keys would turn every matching letter in the error into [hidden].
+    return text.replace(secret, "[hidden]") if len(secret) >= 8 else text

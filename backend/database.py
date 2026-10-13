@@ -65,6 +65,15 @@ CREATE TABLE IF NOT EXISTS activity_events (
  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS activity_events_user_idx ON activity_events(user_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS research_collections (
+ id UUID PRIMARY KEY, user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ name TEXT NOT NULL CHECK (length(trim(name)) > 0),
+ paper_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+ artifact_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ UNIQUE (user_id, name)
+);
+CREATE INDEX IF NOT EXISTS research_collections_user_idx ON research_collections(user_id, updated_at DESC);
 CREATE TABLE IF NOT EXISTS user_preferences (
  user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
  profile_data JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -282,6 +291,54 @@ def record_activity(user_id: str, action: str, details: dict[str, Any] | None = 
         conn.commit()
 
 
+def list_user_collections(user_id: str) -> list[dict[str, Any]]:
+    with connection() as conn, conn.cursor(row_factory=psycopg.rows.dict_row) as cursor:
+        cursor.execute("""SELECT id::text, name, paper_ids, artifact_ids, created_at, updated_at
+                       FROM research_collections WHERE user_id = %s ORDER BY updated_at DESC""", (user_id,))
+        return list(cursor.fetchall())
+
+
+def save_user_collection(user_id: str, name: str, paper_ids: list[str], artifact_ids: list[str]) -> dict[str, Any]:
+    collection_id = str(__import__("uuid").uuid4())
+    with connection() as conn, conn.cursor(row_factory=psycopg.rows.dict_row) as cursor:
+        cursor.execute("""INSERT INTO research_collections (id, user_id, name, paper_ids, artifact_ids)
+                       VALUES (%s, %s, %s, %s, %s)
+                       RETURNING id::text, name, paper_ids, artifact_ids, created_at, updated_at""",
+                       (collection_id, user_id, name, Jsonb(paper_ids), Jsonb(artifact_ids)))
+        result = cursor.fetchone()
+        conn.commit()
+        return result
+
+
+def update_user_collection(user_id: str, collection_id: str, name: str,
+                           paper_ids: list[str], artifact_ids: list[str]) -> dict[str, Any] | None:
+    with connection() as conn, conn.cursor(row_factory=psycopg.rows.dict_row) as cursor:
+        cursor.execute("""UPDATE research_collections SET name = %s, paper_ids = %s, artifact_ids = %s,
+                       updated_at = NOW() WHERE user_id = %s AND id = %s
+                       RETURNING id::text, name, paper_ids, artifact_ids, created_at, updated_at""",
+                       (name, Jsonb(paper_ids), Jsonb(artifact_ids), user_id, collection_id))
+        result = cursor.fetchone()
+        conn.commit()
+        return result
+
+
+def user_owns_artifacts(user_id: str, artifact_ids: list[str]) -> bool:
+    if not artifact_ids:
+        return True
+    with connection() as conn, conn.cursor() as cursor:
+        cursor.execute("SELECT COUNT(*) FROM study_artifacts WHERE user_id = %s AND id = ANY(%s::uuid[])",
+                       (user_id, artifact_ids))
+        return cursor.fetchone()[0] == len(set(artifact_ids))
+
+
+def delete_user_collection(user_id: str, collection_id: str) -> bool:
+    with connection() as conn, conn.cursor() as cursor:
+        cursor.execute("DELETE FROM research_collections WHERE user_id = %s AND id = %s", (user_id, collection_id))
+        deleted = cursor.rowcount > 0
+        conn.commit()
+        return deleted
+
+
 DEFAULT_NOTIFICATION_PREFERENCES = {"papers": True, "ideas": True, "viva": False, "newsletter": True, "marketing": False}
 
 
@@ -394,7 +451,10 @@ def list_user_data(user_id: str) -> dict[str, Any]:
         cursor.execute("""SELECT id::text, paper_id::text, title, created_at, updated_at
                        FROM chat_sessions WHERE user_id = %s ORDER BY updated_at DESC LIMIT 100""", (user_id,))
         chats = list(cursor.fetchall())
-        return {"papers": papers, "artifacts": artifacts, "chats": chats, "history": history}
+        cursor.execute("""SELECT id::text, name, paper_ids, artifact_ids, created_at, updated_at
+                       FROM research_collections WHERE user_id = %s ORDER BY updated_at DESC""", (user_id,))
+        collections = list(cursor.fetchall())
+        return {"papers": papers, "artifacts": artifacts, "chats": chats, "history": history, "collections": collections}
 
 
 def create_chat_session(user_id: str, title: str, paper_id: str | None) -> dict[str, Any]:

@@ -81,6 +81,17 @@ export default function ChatWindow() {
     refreshChats();
   }, []);
 
+  useEffect(() => {
+    const applySuggestion = (event) => {
+      if (typeof event.detail === "string") {
+        setInput(event.detail);
+        textareaRef.current?.focus();
+      }
+    };
+    window.addEventListener("scholarmind-chat-suggestion", applySuggestion);
+    return () => window.removeEventListener("scholarmind-chat-suggestion", applySuggestion);
+  }, []);
+
   const openChat = async (session) => {
     try {
       const { chat } = await apiFetch(`/chats/${session.id}`);
@@ -150,6 +161,21 @@ export default function ChatWindow() {
       }]);
     } finally {
       setIsTyping(false);
+    }
+  };
+
+  const rateResearchAnswer = async (message, category, rating) => {
+    try {
+      await apiFetch("/research-feedback", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ category, rating, session_id: activeSession,
+          paper_id: selectedPaperId || null,
+          note: category === "evidence_quality" ? `Citation count: ${message.citations?.length || 0}` : "" }),
+      });
+      setMessages((current) => current.map((item) => item.id === message.id
+        ? { ...item, feedback: { ...(item.feedback || {}), [category]: rating } } : item));
+    } catch (error) {
+      setHistoryError(`Could not save feedback: ${error.message}`);
     }
   };
 
@@ -358,6 +384,12 @@ export default function ChatWindow() {
                     ))}
                   </div>
                 )}
+
+                {msg.role === "assistant" && msg.citations?.length > 0 && <div className="mt-3 rounded-lg border border-slate-100 bg-slate-50 p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2"><p className="text-xs font-semibold text-slate-700">Evaluate this answer</p><div className="flex gap-1.5">{[["helpful", "Helpful"], ["needs_revision", "Needs work"]].map(([rating, label]) => <button key={rating} type="button" onClick={() => rateResearchAnswer(msg, "answer_relevance", rating)} aria-pressed={msg.feedback?.answer_relevance === rating} className={`rounded-md border px-2 py-1 text-[11px] font-medium ${msg.feedback?.answer_relevance === rating ? "border-indigo-300 bg-indigo-100 text-indigo-800" : "border-slate-200 bg-white text-slate-600"}`}>{label}</button>)}</div></div>
+                  <div className="mt-2 flex flex-wrap items-center gap-1.5"><span className="mr-1 text-[11px] text-slate-500">Evidence type:</span>{[["direct", "Direct"], ["indirect", "Indirect"], ["unclear", "Unclear"]].map(([rating, label]) => <button key={rating} type="button" onClick={() => rateResearchAnswer(msg, "evidence_quality", rating)} aria-pressed={msg.feedback?.evidence_quality === rating} className={`rounded-md border px-2 py-1 text-[11px] font-medium ${msg.feedback?.evidence_quality === rating ? "border-emerald-300 bg-emerald-50 text-emerald-800" : "border-slate-200 bg-white text-slate-600"}`}>{label}</button>)}</div>
+                  {msg.feedback && <p role="status" className="mt-2 text-[10px] text-slate-500">Thanks — your review was saved for this account.</p>}
+                </div>}
 
                 <div
                   className={`flex items-center gap-2 mt-2 ${

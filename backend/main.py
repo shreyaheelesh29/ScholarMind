@@ -26,8 +26,10 @@ from database import (create_user, find_user_by_email, get_paper, get_user, hybr
                       mark_user_notifications_read, update_user_settings, record_activity, record_login, save_artifact,
                       save_paper_annotation, delete_paper_annotation,
                       save_chat_message, save_chunks, save_paper_if_unique, sync_admin_emails,
-                      find_duplicate_paper)
-from rag import answer, citations_for, embed, embed_query, expand_mindmap_node, generate_study_artifact
+                      find_duplicate_paper, delete_user_collection, list_user_collections,
+                      save_user_collection, update_user_collection, user_owns_artifacts)
+from rag import (ai_provider_status, answer, citations_for, embed, embed_query,
+                 expand_mindmap_node, generate_study_artifact)
 from document_processor import extract_text
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -43,7 +45,7 @@ ALLOWED_EXTENSIONS = {
     ".jpeg",
 }
 AUTH = HTTPBearer(auto_error=False)
-ARTIFACT_TYPES = {"flashcards", "mindmap", "quiz", "summary", "report", "ppt_outline", "viva", "literature_review", "visualization", "comparison", "research_gap", "research_ideas"}
+ARTIFACT_TYPES = {"flashcards", "mindmap", "quiz", "summary", "report", "ppt_outline", "viva", "literature_review", "visualization", "comparison", "research_gap", "research_ideas", "reading_guide", "method_extraction"}
 
 app = FastAPI(title="ScholarMind Backend", version="1.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:5173").split(","),
@@ -70,7 +72,7 @@ class ChatRequest(BaseModel):
 
 
 class GenerateRequest(BaseModel):
-    kind: str = Field(pattern="^(flashcards|mindmap|quiz|summary|report|ppt_outline|viva|literature_review|visualization|comparison|research_gap|research_ideas)$")
+    kind: str = Field(pattern="^(flashcards|mindmap|quiz|summary|report|ppt_outline|viva|literature_review|visualization|comparison|research_gap|research_ideas|reading_guide|method_extraction)$")
     paper_id: str | None = None
     paper_ids: list[str] | None = Field(default=None, max_length=10)
     prompt: str = Field(default="", max_length=1000)
@@ -135,6 +137,21 @@ class SettingsUpdate(BaseModel):
     profile: dict[str, str] | None = None
     notifications: dict[str, bool] | None = None
     theme: str | None = Field(default=None, pattern="^(light|dark|system)$")
+
+
+class ResearchFeedbackRequest(BaseModel):
+    category: str = Field(pattern="^(answer_relevance|citation_support|evidence_quality)$")
+    rating: str = Field(pattern="^(helpful|needs_revision|direct|indirect|supported|partially_supported|unclear)$")
+    session_id: str | None = None
+    paper_id: str | None = None
+    page_number: int | None = Field(default=None, ge=1)
+    note: str = Field(default="", max_length=500)
+
+
+class ResearchCollectionRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    paper_ids: list[str] = Field(default_factory=list, max_length=50)
+    artifact_ids: list[str] = Field(default_factory=list, max_length=100)
 
 
 @app.on_event("startup")
@@ -290,6 +307,62 @@ def my_data(user: dict[str, Any] = Depends(current_user)):
     return list_user_data(user["id"])
 
 
+@app.get("/api/collections")
+def collections(user: dict[str, Any] = Depends(current_user)):
+    return {"collections": list_user_collections(user["id"])}
+
+
+def persist_collection(payload: ResearchCollectionRequest, user: dict[str, Any], collection_id: str | None = None) -> dict[str, Any]:
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="Enter a collection name")
+    paper_ids = list(dict.fromkeys(payload.paper_ids))
+    artifact_ids = list(dict.fromkeys(payload.artifact_ids))
+    try:
+        for paper_id in paper_ids:
+            uuid.UUID(paper_id)
+        for item_id in artifact_ids:
+            uuid.UUID(item_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="A saved-work ID is invalid") from exc
+    for paper_id in paper_ids:
+        owned_paper(paper_id, user)
+    if not user_owns_artifacts(user["id"], artifact_ids):
+        raise HTTPException(status_code=404, detail="One or more saved items were not found")
+    result = (update_user_collection(user["id"], collection_id, name, paper_ids, artifact_ids)
+              if collection_id else save_user_collection(user["id"], name, paper_ids, artifact_ids))
+    if not result:
+        raise HTTPException(status_code=404, detail="Collection not found")
+    record_activity(user["id"], "saved_research_collection", {"collection_id": result["id"], "name": name})
+    return result
+
+
+@app.post("/api/collections", status_code=201)
+def create_collection(payload: ResearchCollectionRequest, user: dict[str, Any] = Depends(current_user)):
+    try:
+        return {"collection": persist_collection(payload, user)}
+    except psycopg.errors.UniqueViolation as exc:
+        raise HTTPException(status_code=409, detail="A collection with that name already exists") from exc
+
+
+@app.put("/api/collections/{collection_id}")
+def update_collection(collection_id: str, payload: ResearchCollectionRequest, user: dict[str, Any] = Depends(current_user)):
+    existing = next((item for item in list_user_collections(user["id"]) if item["id"] == collection_id), None)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Collection not found")
+    try:
+        return {"collection": persist_collection(payload, user, collection_id)}
+    except psycopg.errors.UniqueViolation as exc:
+        raise HTTPException(status_code=409, detail="A collection with that name already exists") from exc
+
+
+@app.delete("/api/collections/{collection_id}", status_code=204)
+def remove_collection(collection_id: str, user: dict[str, Any] = Depends(current_user)):
+    if not delete_user_collection(user["id"], collection_id):
+        raise HTTPException(status_code=404, detail="Collection not found")
+    return Response(status_code=204)
+
+
 @app.get("/api/settings")
 def settings(user: dict[str, Any] = Depends(current_user)):
     return get_user_settings(user["id"])
@@ -339,6 +412,19 @@ def chat_detail(chat_id: str, user: dict[str, Any] = Depends(current_user)):
     if not result:
         raise HTTPException(status_code=404, detail="Chat not found")
     return {"chat": result}
+
+
+@app.post("/api/research-feedback", status_code=201)
+def research_feedback(payload: ResearchFeedbackRequest, user: dict[str, Any] = Depends(current_user)):
+    if payload.session_id and not get_user_chat(user["id"], payload.session_id):
+        raise HTTPException(status_code=404, detail="Chat session not found")
+    if payload.paper_id:
+        owned_paper(payload.paper_id, user)
+    details = {"category": payload.category, "rating": payload.rating,
+               "session_id": payload.session_id, "paper_id": payload.paper_id,
+               "page_number": payload.page_number, "note": payload.note.strip()}
+    record_activity(user["id"], "research_feedback", details)
+    return {"ok": True}
 
 
 @app.get("/api/admin/overview")
@@ -627,7 +713,7 @@ def chat(request: ChatRequest, user: dict[str, Any] = Depends(current_user)):
     save_chat_message(session["id"], "user", request.question)
     response = {"answer": answer(request.question, hits, history), "citations": citations,
                 "sources": [{"type": "page", "label": f"{item['paperTitle']} p.{item['page']}", "page": item["page"]} for item in citations],
-                "mode": "llm" if os.getenv("LLM_API_KEY") else "retrieval-only"}
+                "mode": "llm" if ai_provider_status()["configured"] else "retrieval-only"}
     save_chat_message(session["id"], "assistant", response["answer"], citations, response["sources"])
     response["session_id"] = session["id"]
     record_activity(user["id"], "asked_question", {"paper_ids": request.paper_ids or []})
@@ -650,6 +736,8 @@ def generate_learning(payload: GenerateRequest, user: dict[str, Any] = Depends(c
             "literature_review": "research themes methods findings results limitations trends",
             "research_gap": "limitations unresolved questions future work missing evidence contradictory findings",
             "research_ideas": "limitations unresolved questions future work methods findings",
+            "reading_guide": "abstract introduction research question contribution methodology experiments results discussion limitations conclusion",
+            "method_extraction": "methodology research design dataset data sample participants baselines metrics evaluation experimental setup",
     }
     topic_query = retrieval_topics.get(payload.kind)
     if topic_query:
