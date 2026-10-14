@@ -6,6 +6,7 @@ import hashlib
 import random
 import shutil
 import uuid
+from io import BytesIO
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -14,12 +15,17 @@ import pymupdf
 import psycopg
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 import mimetypes
+from pptx import Presentation
+from pptx.dml.color import RGBColor
+from pptx.enum.shapes import MSO_SHAPE
+from pptx.enum.text import PP_ALIGN, MSO_ANCHOR, MSO_AUTO_SIZE
+from pptx.util import Inches, Pt
 
-from auth import create_token, decode_token, hash_password, is_valid_email, verify_password
+from auth import create_token, decode_token, hash_password, is_valid_email, token_secret, verify_password
 from chunking import chunk_text
 from database import (create_user, find_user_by_email, get_paper, get_user, hybrid_search,
                       create_chat_session, get_user_chat, initialise, list_admin_logins, list_admin_users, list_papers, list_user_chats,
@@ -83,6 +89,9 @@ class GenerateRequest(BaseModel):
     difficulty: str = Field(default="medium", pattern="^(simple|medium|hard)$")
     avoid_questions: list[str] = Field(default_factory=list, max_length=20)
     variation_seed: str | None = Field(default=None, max_length=64)
+    presentation_input_type: str = Field(default="paper", pattern="^(paper|notes|topic)$")
+    source_text: str = Field(default="", max_length=15000)
+    presentation_purpose: str = Field(default="research", pattern="^(research|lecture|thesis_defense|conference|project_pitch)$")
 
 
 class MindMapExistingNode(BaseModel):
@@ -190,6 +199,17 @@ def current_user(credentials: HTTPAuthorizationCredentials | None = Depends(AUTH
     return user
 
 
+def require_auth_configuration() -> None:
+    """Fail cleanly before touching account data if token signing is misconfigured."""
+    try:
+        token_secret()
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Sign-in is temporarily unavailable because server authentication is not configured.",
+        ) from exc
+
+
 def admin_user(user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
     if user["role"] != "admin":
         raise HTTPException(status_code=403, detail="Administrator access is required")
@@ -286,6 +306,7 @@ def favicon():
 
 @app.post("/api/auth/register", status_code=201)
 def register(payload: RegisterRequest):
+    require_auth_configuration()
     email = payload.email.strip().lower()
     if not is_valid_email(email):
         raise HTTPException(status_code=422, detail="Enter a valid email address")
@@ -302,6 +323,7 @@ def register(payload: RegisterRequest):
 
 @app.post("/api/auth/login")
 def login(payload: LoginRequest, request: Request):
+    require_auth_configuration()
     email = payload.email.strip().lower()
     user = find_user_by_email(email)
     succeeded = bool(user and verify_password(payload.password, user["password_hash"]))
@@ -755,11 +777,31 @@ def chat(request: ChatRequest, user: dict[str, Any] = Depends(current_user)):
 
 @app.post("/api/learning/generate", status_code=201)
 def generate_learning(payload: GenerateRequest, user: dict[str, Any] = Depends(current_user)):
+    custom_presentation = payload.kind == "ppt_outline" and payload.presentation_input_type in {"notes", "topic"}
     paper_ids = list(dict.fromkeys(payload.paper_ids or ([payload.paper_id] if payload.paper_id else [])))
-    if not paper_ids:
-        raise HTTPException(status_code=422, detail="Select at least one uploaded paper")
-    papers = [owned_paper(paper_id, user) for paper_id in paper_ids]
-    paper_names = ", ".join(paper["filename"] for paper in papers)
+    if custom_presentation:
+        source_text = payload.source_text.strip()
+        if not source_text:
+            raise HTTPException(status_code=422, detail="Enter notes or a presentation topic first")
+        paper_ids = []
+        papers = []
+        paper_names = "your provided notes" if payload.presentation_input_type == "notes" else source_text[:100]
+        source_label = "User-provided notes" if payload.presentation_input_type == "notes" else "User-provided topic"
+        hits = [
+            {
+                "paper_id": None,
+                "filename": source_label,
+                "page_number": "n/a",
+                "section": f"Input {index + 1}",
+                "content": source_text[offset:offset + 1600],
+            }
+            for index, offset in enumerate(range(0, len(source_text), 1600))
+        ]
+    else:
+        if not paper_ids:
+            raise HTTPException(status_code=422, detail="Select an uploaded paper")
+        papers = [owned_paper(paper_id, user) for paper_id in paper_ids]
+        paper_names = ", ".join(paper["filename"] for paper in papers)
     focus = payload.prompt.strip()
     retrieval_topics = {
             "quiz": "important concepts definitions methods results findings conclusions limitations",
@@ -773,7 +815,9 @@ def generate_learning(payload: GenerateRequest, user: dict[str, Any] = Depends(c
             "method_extraction": "methodology research design dataset data sample participants baselines metrics evaluation experimental setup",
     }
     topic_query = retrieval_topics.get(payload.kind)
-    if topic_query:
+    if custom_presentation:
+        query = payload.source_text.strip()
+    elif topic_query:
         query = f"{topic_query} {focus} from {paper_names}".strip()
     elif focus:
         query = focus
@@ -843,7 +887,7 @@ def generate_learning(payload: GenerateRequest, user: dict[str, Any] = Depends(c
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    if content.get("_generation_mode") == "source_fallback":
+    if content.get("_generation_mode") == "source_fallback" and payload.kind != "ppt_outline":
         raise HTTPException(status_code=503, detail=content.get("_generation_notice", "AI generation failed. Please try again."))
     if payload.kind == "quiz":
         questions = content.get("questions", [])
@@ -860,7 +904,23 @@ def generate_learning(payload: GenerateRequest, user: dict[str, Any] = Depends(c
                 question["answer"] = shuffled_options.index(correct_option)
     kind_title = payload.kind.replace("_", " ").title()
     artifact_title = (f"{kind_title}: {focus}" if focus else f"{kind_title} from {paper_names}")[:200]
-    artifact = save_artifact(user["id"], payload.kind, artifact_title, {**content, "citations": citations_for(hits), "source_paper_ids": paper_ids}, paper_ids[0])
+    if custom_presentation:
+        for item in content.get("slides", []):
+            item["page"] = None
+    elif payload.kind == "ppt_outline":
+        valid_pages = {int(hit["page_number"]) for hit in hits if isinstance(hit.get("page_number"), int)}
+        for item in content.get("slides", []):
+            page = item.get("page")
+            if not isinstance(page, int) or page not in valid_pages:
+                item["page"] = None
+    citations = [] if custom_presentation or payload.kind == "ppt_outline" else citations_for(hits)
+    artifact_payload = {**content, "citations": citations, "source_paper_ids": paper_ids}
+    if payload.kind == "ppt_outline":
+        artifact_payload.update({
+            "presentation_input_type": payload.presentation_input_type,
+            "presentation_purpose": payload.presentation_purpose,
+        })
+    artifact = save_artifact(user["id"], payload.kind, artifact_title, artifact_payload, paper_ids[0] if paper_ids else None)
     record_activity(user["id"], f"generated_{payload.kind}", {"artifact_id": artifact["id"], "paper_ids": paper_ids})
     if payload.kind == "quiz":
         public_payload = dict(artifact["payload"])
@@ -970,6 +1030,82 @@ def expand_learning_mindmap(payload: MindMapExpansionRequest, user: dict[str, An
         )
     except ValueError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.post("/api/presentations/export")
+def export_presentation(payload: PresentationExportRequest, user: dict[str, Any] = Depends(current_user)):
+    """Build a PowerPoint from the signed-in user's current presentation editor state."""
+    presentation = Presentation()
+    presentation.slide_width = Inches(13.333)
+    presentation.slide_height = Inches(7.5)
+
+    for item in payload.slides:
+        slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+        background = slide.background.fill
+        background.solid()
+        background.fore_color.rgb = RGBColor(248, 250, 252)
+
+        band = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, presentation.slide_width, Inches(0.16))
+        band.fill.solid()
+        band.fill.fore_color.rgb = RGBColor(79, 70, 229)
+        band.line.fill.background()
+
+        title_box = slide.shapes.add_textbox(Inches(0.75), Inches(0.55), Inches(11.8), Inches(1.0))
+        title_frame = title_box.text_frame
+        title_frame.clear()
+        title_frame.word_wrap = True
+        title_frame.vertical_anchor = MSO_ANCHOR.MIDDLE
+        title_frame.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
+        title_paragraph = title_frame.paragraphs[0]
+        title_paragraph.text = item.title.strip()
+        title_paragraph.font.name = "Aptos Display"
+        title_paragraph.font.size = Pt(30)
+        title_paragraph.font.bold = True
+        title_paragraph.font.color.rgb = RGBColor(15, 23, 42)
+
+        content_box = slide.shapes.add_textbox(Inches(1.0), Inches(1.9), Inches(11.2), Inches(4.75))
+        content_frame = content_box.text_frame
+        content_frame.clear()
+        content_frame.word_wrap = True
+        content_frame.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
+        lines = [line.strip() for line in item.content if line.strip()]
+        font_size = 20 if len(lines) <= 6 else 17
+        if not lines:
+            lines = ["No slide content provided."]
+        for line_index, line in enumerate(lines):
+            paragraph = content_frame.paragraphs[0] if line_index == 0 else content_frame.add_paragraph()
+            paragraph.text = f"•  {line}"
+            paragraph.level = 0
+            paragraph.font.name = "Aptos"
+            paragraph.font.size = Pt(font_size)
+            paragraph.font.color.rgb = RGBColor(51, 65, 85)
+            paragraph.space_after = Pt(14)
+
+        footer = slide.shapes.add_textbox(Inches(0.75), Inches(7.02), Inches(11.8), Inches(0.25))
+        footer_paragraph = footer.text_frame.paragraphs[0]
+        cited_pages = sorted(set(item.pages + ([item.page] if item.page else [])))
+        source = f"Source: pages {', '.join(map(str, cited_pages))}" if cited_pages else payload.source_label
+        footer_paragraph.text = f"ScholarMind  •  {source}"
+        footer_paragraph.font.name = "Aptos"
+        footer_paragraph.font.size = Pt(10)
+        footer_paragraph.font.color.rgb = RGBColor(100, 116, 139)
+        footer_paragraph.alignment = PP_ALIGN.LEFT
+
+        notes = item.speaker_notes.strip()
+        if cited_pages:
+            notes = f"Source pages: {', '.join(map(str, cited_pages))}\n\n{notes}".strip()
+        if notes:
+            slide.notes_slide.notes_text_frame.text = notes
+
+    output = BytesIO()
+    presentation.save(output)
+    output.seek(0)
+    filename = re.sub(r"[^A-Za-z0-9_-]+", "-", payload.title).strip("-_").lower() or "scholarmind-presentation"
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        headers={"Content-Disposition": f'attachment; filename="{filename[:80]}.pptx"'},
+    )
 
 
 @app.patch("/api/artifacts/{artifact_id}")

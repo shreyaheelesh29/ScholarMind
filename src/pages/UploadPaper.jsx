@@ -68,19 +68,9 @@ export default function UploadPaper() {
       <div className="flex items-start justify-between">
         <div>
           <h1 className="text-2xl font-bold text-slate-900">Upload Papers</h1>
-          <p className="mt-1 text-slate-500">Upload PDF documents to analyze with AI</p>
+          <p className="mt-1 text-slate-500">Upload research papers and documents to analyze with AI</p>
         </div>
-        {uploadedFiles.some((f) => f.status === "processed") && (
-          <Button
-            leftIcon={
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
-              </svg>
-            }
-          >
-            Start Analysis
-          </Button>
-        )}
+        {uploadedFiles.some((f) => f.status === "processed") && <Link to="/papers" className="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-indigo-700">Open My Papers <span aria-hidden="true">↗</span></Link>}
       </div>
 
       <UploadZone onFilesSelected={handleFilesSelected} />

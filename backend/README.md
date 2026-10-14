@@ -24,4 +24,4 @@ PDF uploads are fingerprinted with SHA-256. Uploading an identical file again in
 
 On Windows, you can run `./start.ps1` from the `backend` directory instead. It selects a virtual environment that can import the required backend packages, avoiding stale environments that point to a removed Python installation.
 
-Use `http://localhost:8000/docs` to inspect endpoints. Media transcription/audio-video generation and actual `.pptx` file export are not included yet; PPT generation currently stores a structured outline with speaker notes.
+Use `http://localhost:8000/docs` to inspect endpoints. The PPT Generator can build source-grounded decks from every indexed chunk of an uploaded document, pasted notes, or supplied topic details; it does not add outside facts. Users can choose a research overview, lecture, thesis defense, conference talk, or project pitch, then export an editable `.pptx` with presenter notes. Paper-based slides retain source-page labels. The result summarizes the source to fit the chosen slide count. Media transcription and audio-video generation are not included yet.

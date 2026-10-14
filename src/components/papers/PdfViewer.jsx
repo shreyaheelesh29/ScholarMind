@@ -40,29 +40,28 @@ export default function PdfViewer() {
 
     const loadPaper = async () => {
       try {
-        const [details, annotationData, response] = await Promise.all([
+        const [details, annotationData] = await Promise.all([
           apiFetch(`/papers/${encodeURIComponent(paperId)}`),
           apiFetch(`/papers/${encodeURIComponent(paperId)}/annotations`),
-          fetch(`/api/papers/${encodeURIComponent(paperId)}/file`, {
-            headers: { Authorization: `Bearer ${localStorage.getItem("scholarmind_token") || ""}` },
-          }),
         ]);
-        if (!response.ok) {
-          const result = await response.json().catch(() => ({}));
-          throw new Error(result.detail || "Could not load this PDF.");
+        const index = await apiFetch(`/papers/${encodeURIComponent(paperId)}/index`);
+        if (details.file_type === ".pdf") {
+          const response = await fetch(`/api/papers/${encodeURIComponent(paperId)}/file`, {
+            headers: { Authorization: `Bearer ${localStorage.getItem("scholarmind_token") || ""}` },
+          });
+          if (!response.ok) {
+            const result = await response.json().catch(() => ({}));
+            throw new Error(result.detail || "Could not load this PDF.");
+          }
+          objectUrl = URL.createObjectURL(await response.blob());
         }
-        objectUrl = URL.createObjectURL(await response.blob());
         if (!cancelled) {
           setPaper(details);
           setAnnotations(annotationData.annotations || []);
           setCurrentPage(Math.min(Math.max(requestedPage, 1), details.page_count || 1));
+          setPdfIndex(index);
           setPdfUrl(objectUrl);
         }
-        // The PDF can render as soon as its file and metadata arrive. Loading
-        // and parsing the document outline should not hold the viewer hostage.
-        apiFetch(`/papers/${encodeURIComponent(paperId)}/index`)
-          .then((index) => { if (!cancelled) setPdfIndex(index); })
-          .catch(() => {});
       } catch (loadError) {
         if (!cancelled) setError(loadError.message || "Could not load this PDF.");
       }
@@ -76,6 +75,7 @@ export default function PdfViewer() {
   }, [paperId]);
 
   const totalPages = paper?.page_count || 0;
+  const isPdf = paper?.file_type === ".pdf";
   const goToPage = (value) => {
     const page = Math.min(Math.max(Number.parseInt(value, 10) || 1, 1), totalPages || 1);
     setCurrentPage(page);
@@ -134,7 +134,7 @@ export default function PdfViewer() {
   }
 
   if (error) return <div className="rounded-xl border border-red-200 bg-red-50 p-5 text-sm text-red-700">{error}<div className="mt-3"><Link to="/papers" className="font-semibold underline">Back to My Papers</Link></div></div>;
-  if (!paper || !pdfUrl) return <p className="p-6 text-sm text-slate-500" role="status">Loading PDF…</p>;
+  if (!paper || (isPdf && !pdfUrl)) return <p className="p-6 text-sm text-slate-500" role="status">Loading document…</p>;
 
   return <section className="flex h-[calc(100vh-8rem)] min-h-[500px] flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white">
     <header className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-3">
@@ -147,7 +147,7 @@ export default function PdfViewer() {
         <button type="button" onClick={() => setZoom((value) => Math.max(50, value - 10))} className="rounded border px-2 py-1 text-sm" aria-label="Zoom out">−</button>
         <span className="w-12 text-center text-sm text-slate-600">{zoom}%</span>
         <button type="button" onClick={() => setZoom((value) => Math.min(200, value + 10))} className="rounded border px-2 py-1 text-sm" aria-label="Zoom in">+</button>
-        <a href={`${pdfUrl}#page=${currentPage}&zoom=${zoom}`} target="_blank" rel="noreferrer" className="ml-1 rounded bg-slate-100 px-3 py-1.5 text-sm font-medium text-slate-700">Open PDF</a>
+        {isPdf && <a href={`${pdfUrl}#page=${currentPage}&zoom=${zoom}`} target="_blank" rel="noreferrer" className="ml-1 rounded bg-slate-100 px-3 py-1.5 text-sm font-medium text-slate-700">Open PDF</a>}
       </div>
     </header>
     <div className="flex min-h-0 flex-1">
@@ -156,7 +156,7 @@ export default function PdfViewer() {
         <div className="min-h-0 flex-1 overflow-y-auto p-2">
           {pdfIndex.contents.length > 0 && <nav aria-label="Topics" className="space-y-0.5">{pdfIndex.contents.map((item, i) => <button key={`${item.page}-${item.title}-${i}`} type="button" onClick={() => goToPage(item.page)} title={`Go to page ${item.page}`} className={`flex w-full items-start justify-between gap-2 rounded-lg px-2.5 py-2 text-left text-xs transition ${currentPage === item.page ? "bg-indigo-50 font-semibold text-indigo-700" : "text-slate-700 hover:bg-slate-50"}`} style={{ paddingLeft: `${10 + Math.min(item.level || 0, 4) * 12}px` }}><span className="line-clamp-2">{item.title}</span><span className="shrink-0 text-slate-400">{item.page}</span></button>)}</nav>}
           <div className="mb-1 mt-4 border-t border-slate-100 pt-3"><h3 className="px-2.5 text-[11px] font-semibold uppercase tracking-wide text-slate-400">Pages</h3></div>
-          <nav aria-label="All PDF pages" className="space-y-0.5">{pdfIndex.pages.map((item) => <button key={item.page} type="button" onClick={() => goToPage(item.page)} className={`flex w-full items-center justify-between gap-2 rounded-lg px-2.5 py-2 text-left text-xs transition ${currentPage === item.page ? "bg-indigo-50 font-semibold text-indigo-700" : "text-slate-700 hover:bg-slate-50"}`}><span className="line-clamp-1">{item.title}</span><span className="shrink-0 text-slate-400">{item.page}</span></button>)}</nav>
+          <nav aria-label={isPdf ? "All PDF pages" : "All document pages"} className="space-y-0.5">{pdfIndex.pages.map((item) => <button key={item.page} type="button" onClick={() => goToPage(item.page)} className={`flex w-full items-center justify-between gap-2 rounded-lg px-2.5 py-2 text-left text-xs transition ${currentPage === item.page ? "bg-indigo-50 font-semibold text-indigo-700" : "text-slate-700 hover:bg-slate-50"}`}><span className="line-clamp-1">{item.title || `Page ${item.page}`}</span><span className="shrink-0 text-slate-400">{item.page}</span></button>)}</nav>
           <section className="mt-4 border-t border-slate-100 pt-3" aria-label="Saved notes and highlights">
             <div className="flex items-center justify-between gap-2 px-2.5">
               <h3 className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Notes & highlights</h3>
@@ -175,7 +175,14 @@ export default function PdfViewer() {
           </section>
         </div>
       </aside>
-      <iframe key={`${pdfUrl}-${currentPage}-${zoom}`} title={`PDF viewer: ${paper.filename}`} src={`${pdfUrl}#page=${currentPage}&zoom=${zoom}`} className="min-h-0 min-w-0 flex-1 bg-slate-100" />
+      {isPdf ? <iframe key={`${pdfUrl}-${currentPage}-${zoom}`} title={`PDF viewer: ${paper.filename}`} src={`${pdfUrl}#page=${currentPage}&zoom=${zoom}`} className="min-h-0 min-w-0 flex-1 bg-slate-100" /> : <article className="min-h-0 min-w-0 flex-1 overflow-y-auto bg-slate-50 p-6" aria-label={`Document page ${currentPage}`}>
+        <div className="mx-auto max-w-3xl rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+          <p className="text-xs font-semibold uppercase tracking-wide text-indigo-600">{paper.file_type?.replace(".", "").toUpperCase() || "DOCUMENT"} · Page / slide {currentPage} of {totalPages}</p>
+          <h2 className="mt-2 text-xl font-bold text-slate-900">{pdfIndex.pages[currentPage - 1]?.title || `Page ${currentPage}`}</h2>
+          <p className="mt-5 whitespace-pre-wrap text-sm leading-7 text-slate-700">{pdfIndex.pages[currentPage - 1]?.text || "No extracted text is available for this page."}</p>
+          <p className="mt-6 border-t border-slate-100 pt-3 text-xs text-slate-500">Text extracted from the uploaded file. Original layout and images are not shown in this viewer.</p>
+        </div>
+      </article>}
     </div>
   </section>;
 }
