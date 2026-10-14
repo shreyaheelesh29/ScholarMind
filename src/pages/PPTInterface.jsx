@@ -67,6 +67,10 @@ export default function PPTInterface() {
     };
   }, [current, slides, editingId]);
 
+  useEffect(() => {
+    if (slidePreviewRef.current) slidePreviewRef.current.scrollTop = 0;
+  }, [current, pptArtifact?.id]);
+
   const scrollPreview = () => {
     const element = slidePreviewRef.current;
     if (!element) return;
@@ -150,6 +154,7 @@ export default function PPTInterface() {
     setAuthExpired(false);
     setGenerationError("");
     setGenerationNotice("");
+    if (slidePreviewRef.current) slidePreviewRef.current.scrollTop = 0;
     try {
       const result = await apiFetch("/learning/generate", {
         method: "POST",
@@ -162,6 +167,7 @@ export default function PPTInterface() {
           presentation_purpose: presentationPurpose,
           prompt: customInstructions.trim(),
           count: slideCount,
+          variation_seed: globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
         }),
       });
       const content = result.artifact.payload || {};
@@ -670,7 +676,7 @@ export default function PPTInterface() {
                 )}
 
                 {slide.type === "generated" && (
-                  <div className="flex min-h-full flex-col">
+                    <div className="min-w-0">
                     <div className="mb-3 border-b-2 border-slate-100 pb-2 sm:mb-4 sm:pb-3"><span className="text-[10px] sm:text-xs font-black uppercase tracking-wider text-primary-600">{slide.pages?.length > 1 ? `Source pages ${slide.pages.join(", ")}` : slide.page ? `Source page ${slide.page}` : pptArtifact?.payload?.presentation_input_type === "notes" ? "From your notes • no page citation" : pptArtifact?.payload?.presentation_input_type === "topic" ? "Topic overview • no page citation" : "Presentation preview"}</span><h2 className="mt-1 text-xl sm:text-2xl lg:text-3xl font-black leading-tight text-slate-900 break-words">{slide.title}</h2></div>
                     {editingId === slide.id ? (
                       <textarea
@@ -679,17 +685,17 @@ export default function PPTInterface() {
                         onChange={(e) => setSlides((existing) => existing.map((item, i) => i === current ? { ...item, bullets: e.target.value.split("\n") } : item))}
                         onBlur={() => persistSlideEdits(slides)}
                         rows={6}
-                        className="min-h-0 flex-1 resize-none rounded-xl border border-primary-200 bg-white p-3 text-sm font-medium leading-relaxed text-slate-800 outline-none focus:ring-2 focus:ring-primary-200"
+                        className="min-h-48 w-full resize-y rounded-xl border border-primary-200 bg-white p-3 text-sm font-medium leading-relaxed text-slate-800 outline-none focus:ring-2 focus:ring-primary-200"
                         placeholder="One point per line"
                       />
                     ) : (
-                      <ul className="flex-1 space-y-2 overflow-visible">{slide.bullets.map((bullet, i) => <li key={i} className="rounded-xl border border-slate-100 bg-white/80 p-2 sm:p-3 text-sm sm:text-base font-medium text-slate-800 break-words">{bullet}</li>)}</ul>
+                      <ul className="space-y-2 pb-2">{slide.bullets.map((bullet, i) => <li key={i} className="rounded-xl border border-slate-100 bg-white/80 p-2 sm:p-3 text-sm sm:text-base font-medium text-slate-800 break-words">{bullet}</li>)}</ul>
                     )}
                   </div>
                 )}
               </div>
               <div className="h-9 bg-slate-50 border-t border-slate-100 flex items-center justify-between px-5 flex-shrink-0">
-                <span className="text-xs font-semibold text-slate-500">ScholarMind • {slide.label}</span>
+                <span className="text-xs font-semibold text-slate-500">{slide.type === "generated" ? "Scroll inside the slide to read all text" : `ScholarMind • ${slide.label}`}</span>
                 <span className={`text-xs font-black bg-gradient-to-r ${slide.gradient} bg-clip-text text-transparent`}>
                   {current + 1} / {slides.length}
                 </span>

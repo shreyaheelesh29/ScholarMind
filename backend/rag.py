@@ -170,16 +170,150 @@ def _presentation_source_fallback(hits: list[dict[str, Any]], count: int, notice
                 group["content"].append(bullet)
 
     slides = [group for group in grouped.values() if group["content"]]
-    title_counts: dict[str, int] = {}
-    for item in slides:
-        title_counts[item["title"]] = title_counts.get(item["title"], 0) + 1
-    for item in slides:
-        if title_counts[item["title"]] > 1 and isinstance(item.get("page"), int):
-            item["title"] = f"{item['title']} · p. {item['page']}"
     slides = slides[:max(1, min(count, 12))]
     for slide in slides:
         slide["speaker_notes"] = _presentation_speaker_notes(slide["content"])
     return {"slides": slides, "_generation_mode": "source_fallback", "_generation_notice": notice}
+
+
+def _generate_local_presentation(base_url: str, model: str, messages: list[dict[str, str]],
+                                 hits: list[dict[str, Any]], count: int) -> dict[str, Any]:
+    """Generate Ollama decks in small batches and fill gaps with exact source excerpts."""
+    user_prompt = messages[1]["content"]
+    instruction, separator, sources = user_prompt.partition("\n\nSOURCES:\n")
+    if not separator or not sources.strip():
+        raise ValueError("Presentation source passages were missing")
+
+    slides: list[dict[str, Any]] = []
+    seen_titles: set[str] = set()
+    seen_points: set[str] = set()
+    source_notices: list[str] = []
+    used_source_fill = False
+
+    def slide_terms(slide: dict[str, Any]) -> set[str]:
+        text = " ".join([str(slide.get("title", "")), *map(str, slide.get("content", []))])
+        common = {"about", "after", "also", "among", "approach", "based", "from", "into", "paper", "research", "study", "their", "these", "this", "using", "with"}
+        return {word for word in re.findall(r"[a-z0-9]+", text.casefold()) if len(word) > 3 and word not in common}
+
+    def repeats_existing(candidate: dict[str, Any]) -> bool:
+        candidate_title = re.sub(r"\W+", " ", str(candidate.get("title", "")).casefold()).strip()
+        candidate_terms = slide_terms(candidate)
+        for existing in slides:
+            existing_title = re.sub(r"\W+", " ", str(existing.get("title", "")).casefold()).strip()
+            if candidate_title == existing_title:
+                return True
+            existing_terms = slide_terms(existing)
+            overlap = len(candidate_terms & existing_terms)
+            union = len(candidate_terms | existing_terms)
+            if overlap >= 5 and union and overlap / union >= 0.42:
+                return True
+        return False
+
+    # Small batches keep Qwen's prompt and JSON response within its practical
+    # context/output limits, while the loop still honors the selected slide count.
+    max_calls = max(3, (count + 2) // 3 + 2)
+    calls = 0
+    while len(slides) < count and calls < max_calls:
+        batch_count = min(3, count - len(slides))
+        excluded = "\n".join(
+            f"- {slide.get('title', '')[:80]}: "
+            + "; ".join(str(point)[:90] for point in slide.get("content", [])[:3])
+            for slide in slides if slide.get("title")
+        )[:850]
+        batch_prompt = (
+            f"{instruction}\nGenerate exactly {batch_count} additional slides for this deck. "
+            "Each must cover a distinct, source-supported idea and include concise bullets plus a useful spoken presenter script. "
+            "Do not repeat or rephrase any existing slide title, key point, or conclusion. Cover another source-supported section or angle. "
+            "If the source cannot support another distinct slide, return only genuinely new slides. Return JSON only using the required slides schema."
+        )
+        if excluded:
+            batch_prompt += f"\nExisting slides and points to avoid:\n{excluded}"
+        try:
+            raw = _chat_request(
+                base_url, model,
+                [messages[0], {"role": "user", "content": f"{batch_prompt}\n\nSOURCES:\n{sources}"}],
+                timeout=_ollama_timeout_seconds(),
+                max_tokens=min(1500, max(850, batch_count * 420)),
+                temperature=0.3,
+                json_schema=_presentation_schema(batch_count),
+                attempts=2,
+            )
+            start, end = raw.find("{"), raw.rfind("}")
+            if start < 0 or end < start:
+                raise ValueError("Local Ollama returned incomplete slide JSON")
+            batch = json.loads(raw[start:end + 1])
+            candidates = batch.get("slides") if isinstance(batch, dict) else None
+            if not isinstance(candidates, list) or not candidates:
+                break
+
+            # Validate each batch before it can be included. The validator drops
+            # only claims that remain unsupported after checking all passages.
+            checked = {"slides": candidates[:batch_count]}
+            _validate_study_artifact("ppt_outline", checked, hits)
+            if checked.get("_generation_notice"):
+                source_notices.append(checked["_generation_notice"])
+            new_count = 0
+            for candidate in checked["slides"]:
+                title_key = re.sub(r"\W+", " ", str(candidate.get("title", "")).casefold()).strip()
+                point_keys = {
+                    re.sub(r"\W+", " ", str(point).casefold()).strip()
+                    for point in candidate.get("content", []) if isinstance(point, str)
+                }
+                if not title_key or title_key in seen_titles or (point_keys and point_keys <= seen_points) or repeats_existing(candidate):
+                    continue
+                slides.append(candidate)
+                seen_titles.add(title_key)
+                seen_points.update(point_keys)
+                new_count += 1
+                if len(slides) >= count:
+                    break
+            calls += 1
+            if not new_count:
+                break
+        except Exception:
+            logger.warning("Local Ollama could not complete a PPT slide batch", exc_info=True)
+            break
+
+    # A smaller model may stop early. Fill remaining slots with concise exact
+    # excerpts from the source, so users still receive a navigable deck instead
+    # of a single partial slide.
+    if len(slides) < count:
+        before_fill = len(slides)
+        draft = _presentation_source_fallback(
+            hits, count, "Some slides use source excerpts because the local model stopped early."
+        )
+        for candidate in draft["slides"]:
+            title_key = re.sub(r"\W+", " ", str(candidate.get("title", "")).casefold()).strip()
+            point_keys = {
+                re.sub(r"\W+", " ", str(point).casefold()).strip()
+                for point in candidate.get("content", []) if isinstance(point, str)
+            }
+            if not title_key or title_key in seen_titles or (point_keys and point_keys <= seen_points) or repeats_existing(candidate):
+                continue
+            slides.append(candidate)
+            seen_titles.add(title_key)
+            seen_points.update(point_keys)
+            if len(slides) >= count:
+                break
+        used_source_fill = len(slides) > before_fill
+
+    if not slides:
+        raise ValueError("Local Ollama and source extraction returned no usable slides")
+    result: dict[str, Any] = {"slides": slides[:count], "_generation_mode": "ai"}
+    _validate_study_artifact("ppt_outline", result, hits)
+    if len(result["slides"]) < count:
+        result["_generation_notice"] = (
+            f"Generated {len(result['slides'])} source-supported slides from the available content; "
+            f"you requested {count}. Add more source material for a fuller deck."
+        )
+    elif used_source_fill or source_notices:
+        notices = []
+        if used_source_fill:
+            notices.append("Source excerpts were used to complete the deck when the local model stopped early.")
+        if source_notices:
+            notices.append(source_notices[-1])
+        result["_generation_notice"] = " ".join(notices)
+    return result
 
 
 def _presentation_schema(max_slides: int) -> dict[str, Any]:
@@ -429,6 +563,12 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
         )
 
     api_key, base_url, local_ollama, model = _provider_settings()
+    if not api_key and not local_ollama and kind == "ppt_outline":
+        # PPT generation should remain available with the local model when a
+        # cloud key is missing or its quota has run out.
+        base_url = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
+        model = os.getenv("OLLAMA_MODEL", "qwen3:4b")
+        local_ollama = True
     if not api_key and not local_ollama:
         fallback_data["_generation_mode"] = "source_fallback"
         fallback_data["_generation_notice"] = ("AI generation is not configured. No quiz, flashcards, or mind map were fabricated; configure an AI provider and generate again."
@@ -437,7 +577,7 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
     compact_study_kind = kind in {"flashcards", "mindmap", "quiz"}
     generation_count = (
         min(count, 20) if kind in {"quiz", "flashcards"} else
-        min(count, 6) if local_ollama and kind == "ppt_outline" else
+        min(count, 12) if local_ollama and kind == "ppt_outline" else
         min(count, 12) if kind == "ppt_outline" else
         min(count, 3) if local_ollama and compact_study_kind else min(count, 10)
     )
@@ -482,6 +622,9 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
             shared = (f"Use only the paper passages below. Focus requested: {prompt}. {item_count} "
                   "Each page must be one of the page numbers shown in the sources. If evidence is insufficient, omit the item. "
                   "Do not copy a passage verbatim as a question; paraphrase and test understanding. Return JSON only, with no markdown." + quiz_level)
+        if kind == "ppt_outline" and variation_seed:
+            shared += (f" Make this a fresh regeneration variation ({variation_seed}): change the selection or ordering "
+                       "of supported points and the narrative emphasis while preserving factual accuracy and source coverage.")
         if kind in {"quiz", "flashcards"} and avoid_questions:
             already_asked = [question.strip()[:160] for question in avoid_questions[-8:] if question.strip()]
             if already_asked:
@@ -628,6 +771,8 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
             )
         return result
     try:
+        if local_ollama and kind == "ppt_outline":
+            return _generate_local_presentation(base_url, model, messages, source_hits, generation_count)
         content = _chat_request(base_url, model, messages,
             timeout=_ollama_timeout_seconds() if local_ollama else 45,
             max_tokens=generation_tokens.get(kind, 1600),
@@ -760,17 +905,16 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
         return result
     except Exception as exc:
         # A model/provider response must not prevent source-based study material from being saved.
-        ppt_rate_limited = (kind == "ppt_outline" and not local_ollama
-                            and isinstance(exc, urllib.error.HTTPError) and exc.code == 429)
-        if ppt_rate_limited:
-            logger.warning("Configured AI provider rate limited PPT generation; trying local Ollama failover")
+        ppt_cloud_failed = kind == "ppt_outline" and not local_ollama
+        if ppt_cloud_failed:
+            logger.warning("Configured AI provider failed PPT generation; trying local Ollama failover")
         else:
             logger.warning("LLM study generation failed; using retrieved paper content instead", exc_info=True)
         if kind == "ppt_outline":
             # A configured cloud key can be rate limited or out of quota while
             # the user's already-installed local Ollama model is still usable.
             # Keep PPT generation available by retrying this one artifact locally.
-            if ppt_rate_limited:
+            if ppt_cloud_failed:
                 local_base_url = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
                 local_model = os.getenv("OLLAMA_MODEL", "qwen3:4b")
                 local_messages = [
@@ -781,26 +925,20 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
                     )},
                 ]
                 try:
-                    local_content = _chat_request(
-                        local_base_url, local_model, local_messages,
-                        timeout=_ollama_timeout_seconds(),
-                        max_tokens=min(1200, max(700, generation_count * 150)),
-                        temperature=0.1,
-                        json_schema=_presentation_schema(generation_count),
-                        attempts=3,
+                    local_result = _generate_local_presentation(
+                        local_base_url, local_model, local_messages, source_hits, generation_count
                     )
-                    local_start, local_end = local_content.find("{"), local_content.rfind("}")
-                    if local_start < 0 or local_end < local_start:
-                        raise ValueError("Local Ollama did not return a complete slide deck")
-                    local_result = json.loads(local_content[local_start:local_end + 1])
-                    slides = local_result.get("slides") if isinstance(local_result, dict) else None
-                    if not isinstance(slides, list) or not slides:
-                        raise ValueError("Local Ollama returned no slides")
-                    local_result["slides"] = slides[:generation_count]
-                    _validate_study_artifact(kind, local_result, source_hits)
-                    local_result["_generation_mode"] = "ai"
                     quality_notice = local_result.get("_generation_notice")
-                    local_result["_generation_notice"] = "The configured AI provider is rate limited. This deck was generated with local Ollama."
+                    if isinstance(exc, urllib.error.HTTPError) and exc.code == 429:
+                        local_result["_generation_notice"] = (
+                            "The cloud AI provider reached a usage limit, so this deck was generated with local Ollama. "
+                            "You can generate another deck anytime; each click requests a fresh variation."
+                        )
+                    else:
+                        local_result["_generation_notice"] = (
+                            "The cloud AI provider is unavailable, so this deck was generated with local Ollama. "
+                            "You can generate another deck anytime; each click requests a fresh variation."
+                        )
                     if quality_notice:
                         local_result["_generation_notice"] += f" {quality_notice}"
                     return local_result
@@ -1253,28 +1391,44 @@ def _validate_study_artifact(kind: str, result: Any, hits: list[dict[str, Any]])
                 return word[:-1]
             return word
 
-        def claim_support(claim: str, minimum_overlap: int | None = None, minimum_ratio: float = 0.3) -> tuple[bool, set[int]]:
+        def claim_support(claim: str, minimum_overlap: int | None = None, minimum_ratio: float = 0.2) -> tuple[bool, set[int]]:
             terms = {evidence_word(word) for word in re.findall(r"[a-z0-9]+", claim.casefold()) if len(word) > 3 and word not in stop_words}
             numbers = set(re.findall(r"\b\d+(?:\.\d+)?%?\b", claim))
             if not terms and not numbers:
                 return True, set()
             supported = False
             supported_pages: set[int] = set()
+            all_source_terms: set[str] = set()
+            page_overlaps: list[tuple[int, int]] = []
             for hit in hits:
                 source = str(hit.get("content", ""))
                 source_terms = {evidence_word(word) for word in re.findall(r"[a-z0-9]+", source.casefold()) if len(word) > 3}
                 source_numbers = set(re.findall(r"\b\d+(?:\.\d+)?%?\b", source))
                 if numbers - source_numbers:
                     continue
+                all_source_terms.update(source_terms)
                 overlap = len(terms & source_terms)
+                page = hit.get("page_number")
+                page_number = (page if type(page) is int else int(page.strip())
+                               if isinstance(page, str) and page.strip().isdecimal() else None)
+                if page_number is not None and overlap:
+                    page_overlaps.append((overlap, page_number))
                 needed = minimum_overlap or max(1, int(len(terms) * minimum_ratio + 0.999))
                 if overlap >= needed:
-                    raw_page = hit.get("page_number")
-                    if type(raw_page) is int:
-                        supported_pages.add(raw_page)
-                    elif isinstance(raw_page, str) and raw_page.strip().isdecimal():
-                        supported_pages.add(int(raw_page.strip()))
+                    if page_number is not None:
+                        supported_pages.add(page_number)
                     supported = True
+            # A slide bullet can synthesize details across adjacent sections.
+            # The prior per-passage-only threshold discarded these valid
+            # summaries even when the source set contained all their key terms.
+            if not supported and not numbers - {
+                number for hit in hits for number in re.findall(r"\b\d+(?:\.\d+)?%?\b", str(hit.get("content", "")))
+            }:
+                overlap = len(terms & all_source_terms)
+                needed = minimum_overlap or max(1, int(len(terms) * minimum_ratio + 0.999))
+                if overlap >= needed:
+                    supported = True
+                    supported_pages.update(page for _, page in sorted(page_overlaps, reverse=True)[:2])
             return supported, supported_pages
 
         for slide in slides:
@@ -1306,7 +1460,11 @@ def _validate_study_artifact(kind: str, result: Any, hits: list[dict[str, Any]])
                 for hit in hits
                 for number in re.findall(r"\b\d+(?:\.\d+)?%?\b", str(hit.get("content", "")))
             }
-            if set(re.findall(r"\b\d+(?:\.\d+)?%?\b", title)) - source_numbers:
+            # Page labels are citation metadata, not factual numeric claims.
+            # Source-fallback slides may include a trailing "· p. N" title
+            # suffix to distinguish repeated sections from different pages.
+            factual_title = re.sub(r"\s*[·•|—–-]\s*p(?:age)?\.?\s*\d+\s*$", "", title, flags=re.IGNORECASE)
+            if set(re.findall(r"\b\d+(?:\.\d+)?%?\b", factual_title)) - source_numbers:
                 raise ValueError(f"Slide '{title[:80]}' contains a number that is absent from the supplied source")
             notes = slide.get("speaker_notes", "")
             notes = re.sub(r"\s+", " ", notes).strip() if isinstance(notes, str) else ""
