@@ -37,8 +37,9 @@ from database import (create_user, find_user_by_email, get_paper, get_user, hybr
                       save_user_collection, update_user_collection, user_owns_artifacts, list_paper_chunks,
                       update_flashcard_reviews, start_study_session, add_study_session_time,
                       save_quiz_attempt, get_user_artifact, get_dashboard_metrics)
-from rag import (ai_provider_status, answer, citations_for, embed, embed_query,
-                 expand_mindmap_node, generate_study_artifact)
+from rag import (ai_provider_status, answer, citations_for, chat_retrieval_query,
+                 deduplicate_chat_hits, embed, embed_query, expand_mindmap_node,
+                 generate_study_artifact)
 from document_processor import extract_text
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -764,8 +765,6 @@ def chat(request: ChatRequest, user: dict[str, Any] = Depends(current_user)):
     if request.paper_ids:
         for paper_id in request.paper_ids:
             owned_paper(paper_id, user)
-    hits = hybrid_search(request.question, embed_query(request.question), request.paper_ids, request.top_k, owner_id=user["id"])
-    citations = citations_for(hits)
     session = None
     history: list[dict[str, str]] = []
     if request.session_id:
@@ -779,6 +778,10 @@ def chat(request: ChatRequest, user: dict[str, Any] = Depends(current_user)):
                    if message["role"] in {"user", "assistant"}]
     else:
         session = create_chat_session(user["id"], request.question.strip()[:120], request.paper_ids[0] if request.paper_ids else None)
+    retrieval_question = chat_retrieval_query(request.question, history)
+    hits = hybrid_search(retrieval_question, embed_query(retrieval_question), request.paper_ids, request.top_k, owner_id=user["id"])
+    hits = deduplicate_chat_hits(hits, request.top_k)
+    citations = citations_for(hits)
     save_chat_message(session["id"], "user", request.question)
     response = {"answer": answer(request.question, hits, history), "citations": citations,
                 "sources": [{"type": "page", "label": f"{item['paperTitle']} p.{item['page']}", "page": item["page"]} for item in citations],
