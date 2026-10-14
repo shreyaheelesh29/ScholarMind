@@ -141,6 +141,7 @@ class PresentationSlide(BaseModel):
     content: list[str] = Field(default_factory=list, max_length=30)
     speaker_notes: str = Field(default="", max_length=10000)
     page: int | None = Field(default=None, ge=1)
+    pages: list[int] = Field(default_factory=list, max_length=30)
 
 
 class PresentationExportRequest(BaseModel):
@@ -934,7 +935,8 @@ def export_presentation(payload: PresentationExportRequest, user: dict[str, Any]
 
         footer = slide.shapes.add_textbox(Inches(0.75), Inches(7.02), Inches(11.8), Inches(0.25))
         footer_paragraph = footer.text_frame.paragraphs[0]
-        source = f"Source: page {item.page}" if item.page else payload.source_label
+        cited_pages = sorted(set(item.pages + ([item.page] if item.page else [])))
+        source = f"Source: pages {', '.join(map(str, cited_pages))}" if cited_pages else payload.source_label
         footer_paragraph.text = f"ScholarMind  •  {source}"
         footer_paragraph.font.name = "Aptos"
         footer_paragraph.font.size = Pt(10)
@@ -942,8 +944,8 @@ def export_presentation(payload: PresentationExportRequest, user: dict[str, Any]
         footer_paragraph.alignment = PP_ALIGN.LEFT
 
         notes = item.speaker_notes.strip()
-        if item.page:
-            notes = f"Source page: {item.page}\n\n{notes}".strip()
+        if cited_pages:
+            notes = f"Source pages: {', '.join(map(str, cited_pages))}\n\n{notes}".strip()
         if notes:
             slide.notes_slide.notes_text_frame.text = notes
 

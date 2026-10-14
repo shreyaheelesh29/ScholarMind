@@ -60,6 +60,7 @@ export default function PPTInterface() {
         content: item.bullets || [],
         speaker_notes: item.speakerNotes || "",
         page: Number.isInteger(item.page) ? item.page : null,
+        pages: Array.isArray(item.pages) ? item.pages : [],
       })),
     };
     setPptArtifact((item) => ({ ...item, payload }));
@@ -73,7 +74,7 @@ export default function PPTInterface() {
   const addSlide = () => {
     const newSlide = {
       id: Date.now(), type: "generated", label: "New slide", title: "New slide",
-      bullets: ["Add a key point from your source."], speakerNotes: "", page: null,
+      bullets: ["Add a key point from your source."], speakerNotes: "", page: null, pages: [],
       icon: "✨", gradient: "from-indigo-500 to-purple-500",
     };
     const nextSlides = [...slides, newSlide];
@@ -135,7 +136,7 @@ export default function PPTInterface() {
       const generated = (content.slides || []).map((item, i) => ({
         id: i + 1, type: "generated", label: item.title || `Slide ${i + 1}`, title: item.title || `Slide ${i + 1}`,
         bullets: Array.isArray(item.content) ? item.content : String(item.content || "").split(/(?<=[.!?])\s+/).filter(Boolean),
-        speakerNotes: item.speaker_notes || "", page: item.page, icon: "📄", gradient: ["from-indigo-500 to-purple-500", "from-blue-500 to-cyan-500", "from-emerald-500 to-teal-500"][i % 3],
+        speakerNotes: item.speaker_notes || "", page: item.page, pages: Array.isArray(item.pages) ? item.pages : (item.page ? [item.page] : []), icon: "📄", gradient: ["from-indigo-500 to-purple-500", "from-blue-500 to-cyan-500", "from-emerald-500 to-teal-500"][i % 3],
       }));
       if (!generated.length) throw new Error("The service returned no slides. Try again with a different paper.");
       setSlides(generated); setCurrent(0); setGenerationProgress(100);
@@ -173,6 +174,7 @@ export default function PPTInterface() {
             content: item.bullets || [],
             speaker_notes: item.speakerNotes || "",
             page: Number.isInteger(item.page) ? item.page : null,
+            pages: Array.isArray(item.pages) ? item.pages : [],
           })),
         }),
       });
@@ -635,7 +637,7 @@ export default function PPTInterface() {
 
                 {slide.type === "generated" && (
                   <div className="flex h-full flex-col">
-                    <div className="mb-3 border-b-2 border-slate-100 pb-2 sm:mb-4 sm:pb-3"><span className="text-[10px] sm:text-xs font-black uppercase tracking-wider text-primary-600">{slide.page ? `Source page ${slide.page}` : pptArtifact?.payload?.presentation_input_type === "notes" ? "From your notes • no page citation" : pptArtifact?.payload?.presentation_input_type === "topic" ? "Topic overview • no page citation" : "Presentation preview"}</span><h2 className="mt-1 text-xl sm:text-2xl lg:text-3xl font-black leading-tight text-slate-900 break-words">{slide.title}</h2></div>
+                    <div className="mb-3 border-b-2 border-slate-100 pb-2 sm:mb-4 sm:pb-3"><span className="text-[10px] sm:text-xs font-black uppercase tracking-wider text-primary-600">{slide.pages?.length > 1 ? `Source pages ${slide.pages.join(", ")}` : slide.page ? `Source page ${slide.page}` : pptArtifact?.payload?.presentation_input_type === "notes" ? "From your notes • no page citation" : pptArtifact?.payload?.presentation_input_type === "topic" ? "Topic overview • no page citation" : "Presentation preview"}</span><h2 className="mt-1 text-xl sm:text-2xl lg:text-3xl font-black leading-tight text-slate-900 break-words">{slide.title}</h2></div>
                     {editingId === slide.id ? (
                       <textarea
                         aria-label="Edit slide bullet points"
