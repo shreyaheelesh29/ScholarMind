@@ -125,6 +125,14 @@ def _is_local_ollama(base_url: str) -> bool:
     return parsed.hostname in {"localhost", "127.0.0.1", "::1"} and parsed.port == 11434
 
 
+def _ollama_timeout_seconds() -> int:
+    """Allow slower local models enough time to finish a bounded generation batch."""
+    try:
+        return min(1200, max(120, int(os.getenv("OLLAMA_TIMEOUT_SECONDS", "600"))))
+    except ValueError:
+        return 600
+
+
 def ai_provider_status() -> dict[str, str | bool]:
     """Resolve the one shared provider configuration used by all AI features."""
     base_url = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/")
@@ -256,7 +264,7 @@ def answer(question: str, hits: list[dict[str, Any]], history: list[dict[str, st
         # Chat should fail over promptly instead of spending minutes in retries. A
         # shorter context and output budget also reduce local Ollama decode time.
         return _chat_request(base_url, model, messages,
-            timeout=120 if _is_local_ollama(base_url) else 30,
+            timeout=_ollama_timeout_seconds() if _is_local_ollama(base_url) else 30,
             max_tokens=768, attempts=1 if _is_local_ollama(base_url) else 2)
     except Exception:
         # Keep document chat usable when the optional LLM service is unavailable.
@@ -432,11 +440,18 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
             missing = batch_count
             retry = 0
             while missing and retry < 3:
-                batch = generate_study_artifact(
-                    kind, prompt, hits, missing, difficulty,
-                    avoid_questions=prior_questions,
-                    variation_seed=f"{variation_seed or 'local'}-{offset // 2 + 1}-retry-{retry + 1}",
-                )
+                try:
+                    batch = generate_study_artifact(
+                        kind, prompt, hits, missing, difficulty,
+                        avoid_questions=prior_questions,
+                        variation_seed=f"{variation_seed or 'local'}-{offset // 2 + 1}-retry-{retry + 1}",
+                    )
+                except Exception:
+                    if combined:
+                        logger.warning("Local Ollama stopped before all requested items were generated; keeping completed items", exc_info=True)
+                        missing = 1
+                        break
+                    raise
                 batch_items = batch.get(item_key)
                 if batch.get("_generation_mode") != "ai" or not isinstance(batch_items, list):
                     if not combined:
@@ -479,7 +494,7 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
         return result
     try:
         content = _chat_request(base_url, model, messages,
-            timeout=120 if local_ollama else 45,
+            timeout=_ollama_timeout_seconds() if local_ollama else 45,
             max_tokens=generation_tokens.get(kind, 1600),
             json_mode=kind != "mindmap",
             json_schema=_mindmap_schema() if kind == "mindmap" and local_ollama else None,
@@ -512,7 +527,7 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
                 ]
                 repaired = _chat_request(
                     base_url, model, repair_messages,
-                    timeout=120 if local_ollama else 45,
+                    timeout=_ollama_timeout_seconds() if local_ollama else 45,
                     max_tokens=generation_tokens.get(kind, 1600),
                     temperature=0.35, json_mode=True, attempts=1,
                 )
@@ -544,7 +559,7 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
                 ]
                 repaired = _chat_request(
                     base_url, model, repair_messages,
-                    timeout=120 if local_ollama else 45,
+                    timeout=_ollama_timeout_seconds() if local_ollama else 45,
                     max_tokens=generation_tokens.get(kind, 1600),
                     temperature=0.35, json_mode=True, attempts=1,
                 )
@@ -838,7 +853,7 @@ def expand_mindmap_node(node_id: str, node_label: str, breadcrumb: list[str], co
     ]
     try:
         raw = _chat_request(
-            base_url, model, messages, timeout=120 if local_ollama else 60,
+            base_url, model, messages, timeout=_ollama_timeout_seconds() if local_ollama else 60,
             temperature=0.2, max_tokens=900, json_mode=True,
             json_schema=_mindmap_expansion_schema() if local_ollama else None, attempts=1,
         )
@@ -1175,7 +1190,8 @@ def _generation_failure_reason(exc: Exception, api_key: str, base_url: str, mode
     provider = f"Local Ollama ({model})" if local_ollama else f"AI provider ({model})"
     if isinstance(exc, (TimeoutError, socket.timeout)):
         if local_ollama:
-            return f"{provider} exceeded the local response limit. Try requesting fewer questions or flashcards, then retry."
+            return (f"{provider} did not finish within {_ollama_timeout_seconds()} seconds. "
+                    "Retry the generation; completed questions or flashcards are preserved when available.")
         return f"{provider} timed out. Check your connection and try again."
     if isinstance(exc, urllib.error.HTTPError):
         if exc.code == 503:
