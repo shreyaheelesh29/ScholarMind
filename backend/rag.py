@@ -73,6 +73,168 @@ def _context(hits: list[dict[str, Any]], max_chars: int = 3000) -> str:
                        for i, h in enumerate(hits, start=1))
 
 
+def _remove_flashcard_separator_artifacts(value: str) -> str:
+    """Remove markdown separator debris accidentally copied from extracted text."""
+    value = re.sub(r"(?m)^\s*#{1,6}\s*={3,}\s*$", "", value)
+    value = re.sub(r"#{1,6}\s*={3,}", "", value)
+    value = re.sub(r"={3,}", "", value)
+    value = re.sub(r"\s+", " ", value).strip()
+    value = re.sub(r"^(?:(?:question\s*)?\d{1,3}\s*[.):\-]\s*)+", "", value, flags=re.IGNORECASE)
+    value = re.sub(r"\b(?:upon subsequent mention|in this study|in this paper)\s*,?\s*", "", value, flags=re.IGNORECASE)
+    return re.sub(r"\s+([,.;!?])", r"\1", value).strip()
+
+
+def _question_key(value: Any) -> str:
+    return " ".join(re.findall(r"[a-z0-9]+", str(value or "").casefold()))
+
+
+def _clean_quiz_question_text(value: Any) -> str:
+    """Remove source-location wording from the question; citations stay in page metadata."""
+    question = re.sub(r"\s+", " ", str(value or "")).strip()
+    locator = r"(?:the\s+)?(?:paper|document|source|passage|abstract|introduction|methods?|results?|discussion|conclusion|page\s*(?:no\.?\s*)?\d+)"
+    page = r"(?:\s*(?:on\s+)?(?:page|p\.?|pp\.?)\s*\d+(?:\s*[-–]\s*\d+)?)?"
+    question = re.sub(
+        rf"\s*(?:,?\s*)(?:according to|as (?:stated|described|reported|explained) in|based on|from|in)\s+{locator}{page}\s*[,;:]?\s*\??$",
+        "?", question, flags=re.IGNORECASE,
+    )
+    question = re.sub(
+        rf"^(?:according to|as (?:stated|described|reported|explained) in|based on)\s+{locator}{page}\s*[,;:]\s*",
+        "", question, flags=re.IGNORECASE,
+    )
+    question = re.sub(
+        rf"\s*\((?:according to|as (?:stated|described|reported|explained) in|based on)\s+{locator}{page}\)",
+        "", question, flags=re.IGNORECASE,
+    )
+    question = re.sub(r"\s*\((?:p\.?|page)\s*\d+(?:\s*[-–]\s*\d+)?\)\s*", " ", question, flags=re.IGNORECASE)
+    question = re.sub(r"\s+([?.!,;:])", r"\1", question)
+    if question and question[0].islower():
+        question = question[0].upper() + question[1:]
+    return question.strip()
+
+
+@lru_cache(maxsize=512)
+def _question_embedding(value: str) -> tuple[float, ...]:
+    vector = embedding_model().encode(
+        [value[:500]], normalize_embeddings=True, show_progress_bar=False,
+    )[0]
+    return tuple(float(component) for component in vector)
+
+
+def _questions_are_equivalent(left: Any, right: Any) -> bool:
+    """Catch exact repeats, close paraphrases, and semantic repeats without topic-only matches."""
+    left_key, right_key = _question_key(left), _question_key(right)
+    if not left_key or not right_key:
+        return False
+    if left_key == right_key:
+        return True
+    stop_words = {"what", "which", "how", "why", "when", "where", "does", "did", "the", "a", "an", "is", "are", "was", "were", "of", "in", "on", "for", "to", "from", "according", "paper"}
+    left_terms = set(left_key.split()) - stop_words
+    right_terms = set(right_key.split()) - stop_words
+    shared = left_terms & right_terms
+    similarity = len(shared) / max(1, len(left_terms | right_terms))
+    if (len(shared) >= 3 and similarity >= 0.72) or (len(shared) >= 2 and similarity >= 0.88):
+        return True
+    try:
+        left_vector = _question_embedding(str(left))
+        right_vector = _question_embedding(str(right))
+        semantic_similarity = sum(a * b for a, b in zip(left_vector, right_vector))
+        return semantic_similarity >= 0.9
+    except Exception:
+        # Keep duplicate checks usable if the optional embedding model is
+        # temporarily unavailable; the lexical near-copy check still applies.
+        return False
+
+
+def _source_backed_flashcards(hits: list[dict[str, Any]], existing: list[dict[str, Any]],
+                              needed: int) -> list[dict[str, Any]]:
+    """Fill a short deck with distinct prompts grounded in complete source sentences.
+
+    The previous fallback only recognized a small set of verb patterns, so a
+    paper with valid descriptive or results sentences could not fill the deck
+    when a small local model returned fewer cards than requested.
+    """
+    stop_words = {
+        "a", "about", "across", "after", "also", "although", "among", "an", "and", "are", "as", "at", "based", "be", "been",
+        "before", "between", "both", "but", "by", "can", "could", "did", "do", "does", "during", "each",
+        "for", "from", "further", "had", "has", "have", "he", "her", "here", "hers", "him", "his", "how",
+        "however", "i", "if", "in", "into", "is", "it", "its", "may", "more", "most", "much", "must",
+        "no", "not", "of", "on", "one", "or", "our", "out", "paper", "result", "results", "same", "she",
+        "should", "since", "so", "some", "such", "study", "than", "that", "the", "their", "them", "then",
+        "there", "these", "they", "this", "those", "three", "through", "to", "under", "upon", "use", "used", "using",
+        "was", "we", "were", "what", "when", "where", "which", "while", "who", "will", "with", "within",
+        "would", "you", "your",
+    }
+    common_verbs = {
+        "achieved", "added", "affects", "analyzed", "applied", "are", "assessed", "based", "collected",
+        "compared", "computed", "conducted", "consists", "contains", "demonstrates", "describes", "developed",
+        "evaluated", "examined", "found", "generated", "has", "have", "identified", "improved", "includes",
+        "included", "including", "increased", "indicates", "introduced", "is", "measured", "obtained", "performed", "proposed", "provided",
+        "reduced", "reported", "results", "showed", "shows", "studied", "suggests", "used", "uses", "utilized",
+        "using", "was", "were",
+    }
+    known = {_question_key(card.get("front", "")) for card in existing if isinstance(card, dict)}
+    known_topics: set[str] = set()
+    facts: list[dict[str, Any]] = []
+    seen_sentences: set[str] = set()
+
+    for hit in hits:
+        content = _remove_flashcard_separator_artifacts(str(hit.get("content", "")))
+        # Treat semicolons as separate supported facts when the source sentence
+        # contains multiple clauses, while retaining complete text for answers.
+        for raw_sentence in re.split(r"(?<=[.!?])\s+|;\s+", content):
+            sentence = raw_sentence.strip(" \t\r\n-•")
+            normalized_sentence = _question_key(sentence)
+            if normalized_sentence in seen_sentences or not 30 <= len(sentence) <= 420:
+                continue
+            if len(sentence.split()) > 65:
+                continue
+            seen_sentences.add(normalized_sentence)
+
+            # Pick one specific concept phrase per sentence. This keeps the
+            # fallback deck varied and avoids manufacturing several near-copy
+            # questions from the same single fact.
+            topics: list[tuple[float, str]] = []
+            for match in re.finditer(r"\b[A-Z][A-Za-z0-9-]*(?:\s+[A-Z][A-Za-z0-9-]*){0,3}\b|\b[A-Z]{2,}(?:-[A-Z0-9]+)?\b", sentence):
+                topic = match.group(0).strip()
+                if (topic.split()[0].casefold() not in stop_words and len(topic.split()) > 1):
+                    topics.append((10 + len(topic.split()), topic))
+            tokens = list(re.finditer(r"[A-Za-z][A-Za-z0-9'-]*", sentence))
+            for width in (3, 2):
+                for start in range(max(0, len(tokens) - width + 1)):
+                    group = tokens[start:start + width]
+                    words = [token.group(0) for token in group]
+                    content_words = [word for word in words if word.casefold().strip("'-") not in stop_words]
+                    if (len(content_words) < 2
+                            or words[0].casefold().strip("'-") in stop_words
+                            or words[-1].casefold().strip("'-") in stop_words
+                            or any(word[0].isdigit() for word in words)
+                            or any(word.casefold().strip("'-") in common_verbs for word in words)):
+                        continue
+                    topic = sentence[group[0].start():group[-1].end()].strip(" ,:;.-")
+                    if len(topic) >= 3 and len(topic.split()) <= 5:
+                        topics.append((len(content_words) * 2 + (width == 3), topic))
+
+            topic = next((topic for _, topic in sorted(topics, key=lambda item: item[0], reverse=True)
+                          if _question_key(topic) not in known_topics
+                          and _question_key(f"What does the paper report about {topic}?") not in known), None)
+            if not topic:
+                continue
+            topic = re.sub(r"\s+", " ", topic).strip(" ,:;.-")
+            front = f"What does the paper report about {topic}?"
+            normalized_front, normalized_topic = _question_key(front), _question_key(topic)
+            if len(sentence.split()) > 45:
+                # Keep the answer concise without changing its source wording.
+                sentence_answer = " ".join(sentence.split()[:45]).rstrip(" ,;:") + "."
+            else:
+                sentence_answer = sentence
+            facts.append({"front": front, "back": sentence_answer, "page": int(hit["page_number"])})
+            known.add(normalized_front)
+            known_topics.add(normalized_topic)
+            if len(facts) >= needed:
+                return facts
+    return facts
+
+
 def _presentation_context(hits: list[dict[str, Any]], max_chars: int = 120_000) -> str:
     """Represent every source chunk while keeping very long papers within model limits."""
     if not hits:
@@ -583,7 +745,7 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
     )
     source_hits = (hits[:min(10, max(5, generation_count))] if local_ollama and kind == "quiz" else
                    hits[:6] if local_ollama and kind == "mindmap" else
-                   hits[:min(8, max(3, generation_count))] if local_ollama and kind == "flashcards" else
+                   hits[:min(12, max(6, generation_count * 2))] if local_ollama and kind == "flashcards" else
                    _spread_hits(hits, 8) if local_ollama and kind == "ppt_outline" else
                    hits[:3] if local_ollama and compact_study_kind else hits)
     if kind == "mindmap":
@@ -622,6 +784,11 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
             shared = (f"Use only the paper passages below. Focus requested: {prompt}. {item_count} "
                   "Each page must be one of the page numbers shown in the sources. If evidence is insufficient, omit the item. "
                   "Do not copy a passage verbatim as a question; paraphrase and test understanding. Return JSON only, with no markdown." + quiz_level)
+        if kind == "flashcards":
+            shared += (
+                " Every front must be a complete, grammatical, specific question that makes sense on its own. "
+                "Every back must answer that question directly in one concise, complete sentence. Avoid fragments and vague prompts."
+            )
         if kind == "ppt_outline" and variation_seed:
             shared += (f" Make this a fresh regeneration variation ({variation_seed}): change the selection or ordering "
                        "of supported points and the narrative emphasis while preserving factual accuracy and source coverage.")
@@ -719,8 +886,12 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
             retry = 0
             while missing and retry < 3:
                 try:
+                    evidence_window = max(3, min(8, len(hits)))
+                    window_start = (offset // 2 + retry * evidence_window) % len(hits)
+                    batch_hits = [hits[(window_start + index) % len(hits)]
+                                  for index in range(min(evidence_window, len(hits)))]
                     batch = generate_study_artifact(
-                        kind, prompt, hits, missing, difficulty,
+                        kind, prompt, batch_hits, missing, difficulty,
                         avoid_questions=prior_questions,
                         variation_seed=f"{variation_seed or 'local'}-{offset // 2 + 1}-retry-{retry + 1}",
                     )
@@ -741,8 +912,12 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
                     if not isinstance(item, dict):
                         continue
                     item_prompt = item.get("question" if kind == "quiz" else "front", "")
+                    if kind == "quiz" and isinstance(item_prompt, str):
+                        item_prompt = _clean_quiz_question_text(item_prompt)
+                        item["question"] = item_prompt
                     normalized_prompt = prompt_key(item_prompt)
-                    if not normalized_prompt or normalized_prompt in used_prompts:
+                    if (not normalized_prompt or normalized_prompt in used_prompts
+                            or any(_questions_are_equivalent(item_prompt, previous) for previous in prior_questions)):
                         continue
                     combined.append(item)
                     used_prompts.add(normalized_prompt)
@@ -759,6 +934,9 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
                 break
 
         result: dict[str, Any] = {item_key: combined}
+        if kind == "flashcards" and len(combined) < generation_count:
+            combined.extend(_source_backed_flashcards(source_hits, combined, generation_count - len(combined)))
+            result[item_key] = combined[:generation_count]
         if kind == "quiz":
             result["difficulty"] = difficulty
         _validate_study_artifact(kind, result, source_hits)
@@ -1165,6 +1343,68 @@ def _mindmap_expansion_schema() -> dict[str, Any]:
     }
 
 
+def _extractive_mindmap_children(node_id: str, node_label: str, breadcrumb: list[str],
+                                existing_nodes: list[dict[str, str]], hits: list[dict[str, Any]],
+                                needed: int) -> list[dict[str, Any]]:
+    """Build cited fallback branches from relevant paper sentences when model labels fail validation."""
+    stop_words = {"about", "after", "also", "among", "and", "are", "because", "been", "being", "between", "but", "can", "could", "does", "during", "each", "for", "from", "have", "into", "its", "may", "more", "most", "not", "onto", "our", "paper", "such", "than", "that", "the", "their", "then", "there", "these", "this", "those", "through", "under", "using", "was", "were", "with", "would"}
+    tokenize = lambda value: re.findall(r"[a-z0-9]+", str(value or "").casefold())
+    parent_terms = {word for value in [node_label, *breadcrumb[-4:]] for word in tokenize(value)
+                    if len(word) > 2 and word not in stop_words}
+    known_labels = {re.sub(r"\s+", " ", str(node.get("label", ""))).strip().casefold()
+                    for node in existing_nodes}
+    known_terms = {word for label in known_labels for word in tokenize(label)}
+    seen_sentences: set[str] = set()
+    candidates: list[tuple[int, float, dict[str, Any], str, list[str], list[str]]] = []
+    for hit in hits:
+        for sentence in re.split(r"(?<=[.!?])\s+|\n+", str(hit.get("content", ""))):
+            sentence = re.sub(r"\s+", " ", sentence).strip(" \t\r\n-•")
+            key = " ".join(tokenize(sentence))
+            if not key or key in seen_sentences or not 35 <= len(sentence) <= 500:
+                continue
+            seen_sentences.add(key)
+            words = [word for word in tokenize(sentence) if len(word) > 2 and word not in stop_words]
+            overlap = [word for word in words if word in parent_terms]
+            if parent_terms and not overlap and node_id != "root":
+                continue
+            novel = [word for word in words if word not in known_terms and word not in overlap and len(word) >= 4]
+            if not novel:
+                continue
+            candidates.append((len(set(overlap)), float(hit.get("score", 0.0) or 0.0), hit, sentence, overlap, novel))
+    candidates.sort(key=lambda item: (item[0], item[1], len(item[3])), reverse=True)
+
+    children: list[dict[str, Any]] = []
+    used_labels = set(known_labels)
+    for _, _, hit, sentence, overlap, novel in candidates:
+        parent_term = (overlap or ["Paper"])[0].title()
+        concept_term = next((word for word in novel if word.casefold() not in known_terms), "")
+        if not concept_term:
+            continue
+        label = f"{parent_term} · {concept_term.title()}"
+        if label.casefold() in used_labels:
+            continue
+        summary = sentence if sentence[-1:] in ".!?" else sentence + "."
+        child = {
+            "id": f"{node_id[:36]}-{re.sub(r'[^a-z0-9]+', '-', label.casefold()).strip('-')[:40]}-{uuid.uuid4().hex[:6]}",
+            "label": label,
+            "summary": summary,
+            "details": f"The paper states: {summary}",
+            "example": "",
+            "key_points": [],
+            "related_concepts": [word for word in novel[1:4]],
+            "importance": False,
+        }
+        try:
+            _attach_mindmap_evidence({"nodes": [child]}, [hit])
+        except ValueError:
+            continue
+        children.append(child)
+        used_labels.add(label.casefold())
+        if len(children) >= needed:
+            break
+    return children
+
+
 def expand_mindmap_node(node_id: str, node_label: str, breadcrumb: list[str], context: str,
                         existing_nodes: list[dict[str, str]], hits: list[dict[str, Any]]) -> dict[str, Any]:
     """Generate three source-cited child concepts for any selected map node."""
@@ -1247,6 +1487,12 @@ def expand_mindmap_node(node_id: str, node_label: str, breadcrumb: list[str], co
             expanded_children.append(item)
             used_labels.add(label.casefold())
 
+        if len(expanded_children) < 3:
+            fallback_nodes = [*existing_nodes, *expanded_children]
+            fallback_children = _extractive_mindmap_children(
+                node_id, node_label, breadcrumb, fallback_nodes, hits, 3 - len(expanded_children),
+            )
+            expanded_children.extend(fallback_children)
         if not expanded_children:
             raise ValueError("The model could not find subtopics with verifiable support in the paper passages. Try another node.")
         edges = [{"source": node_id, "target": item["id"], "label": "includes"} for item in expanded_children]
@@ -1305,9 +1551,14 @@ def _validate_study_artifact(kind: str, result: Any, hits: list[dict[str, Any]])
         items = result.get("questions")
         if not isinstance(items, list) or not items:
             raise ValueError("Quiz has no questions")
+        cleaned_questions: list[dict[str, Any]] = []
         for item in items:
             if not isinstance(item, dict) or not isinstance(item.get("question"), str) or len(item["question"].strip()) < 12:
                 raise ValueError("Quiz question is missing or too short")
+            item["question"] = _clean_quiz_question_text(item["question"])
+            if any(_questions_are_equivalent(item["question"], previous.get("question"))
+                   for previous in cleaned_questions):
+                continue
             options = item.get("options")
             if not isinstance(options, list) or len(options) != 4 or any(not isinstance(x, str) or not x.strip() for x in options) or len({x.strip().casefold() for x in options}) != 4:
                 raise ValueError("Each quiz question must have four unique answer options")
@@ -1317,14 +1568,28 @@ def _validate_study_artifact(kind: str, result: Any, hits: list[dict[str, Any]])
                 raise ValueError("Quiz explanation is missing")
             # Models sometimes invent page numbers despite explicit instructions.
             resolve_citation_page(item, " ".join([item["question"], item["explanation"], *options]), "Quiz question")
+            cleaned_questions.append(item)
+        result["questions"] = cleaned_questions
+        if not cleaned_questions:
+            raise ValueError("Quiz has no distinct questions")
     elif kind == "flashcards":
         items = result.get("cards")
         if not isinstance(items, list) or not items:
             raise ValueError("No flashcards returned")
+        cleaned_cards: list[dict[str, Any]] = []
         for item in items:
             if not isinstance(item, dict) or not all(isinstance(item.get(key), str) and len(item[key].strip()) >= 8 for key in ("front", "back")):
                 raise ValueError("Flashcard needs a meaningful question and answer")
+            item["front"] = _remove_flashcard_separator_artifacts(item["front"])
+            item["back"] = _remove_flashcard_separator_artifacts(item["back"])
+            if any(_questions_are_equivalent(item["front"], previous.get("front"))
+                   for previous in cleaned_cards):
+                continue
             resolve_citation_page(item, f"{item['front']} {item['back']}", "Flashcard")
+            cleaned_cards.append(item)
+        result["cards"] = cleaned_cards
+        if not cleaned_cards:
+            raise ValueError("No distinct flashcards returned")
     elif kind == "mindmap":
         nodes, edges = result.get("nodes"), result.get("edges")
         if not isinstance(nodes, list) or len(nodes) < 5 or not isinstance(edges, list):

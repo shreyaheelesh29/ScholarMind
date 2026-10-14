@@ -74,6 +74,26 @@ CREATE TABLE IF NOT EXISTS research_collections (
  UNIQUE (user_id, name)
 );
 CREATE INDEX IF NOT EXISTS research_collections_user_idx ON research_collections(user_id, updated_at DESC);
+CREATE TABLE IF NOT EXISTS quiz_attempts (
+ id UUID PRIMARY KEY, user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ artifact_id UUID NOT NULL REFERENCES study_artifacts(id) ON DELETE CASCADE,
+ total_questions INTEGER NOT NULL CHECK (total_questions > 0),
+ correct_answers INTEGER NOT NULL CHECK (correct_answers >= 0),
+ incorrect_answers INTEGER NOT NULL CHECK (incorrect_answers >= 0),
+ unanswered INTEGER NOT NULL CHECK (unanswered >= 0),
+ percentage NUMERIC(5,2) NOT NULL CHECK (percentage >= 0 AND percentage <= 100),
+ answers JSONB NOT NULL DEFAULT '{}'::jsonb,
+ UNIQUE (artifact_id),
+ created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS quiz_attempts_user_idx ON quiz_attempts(user_id, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS quiz_attempts_artifact_unique_idx ON quiz_attempts(artifact_id);
+CREATE TABLE IF NOT EXISTS study_sessions (
+ id UUID PRIMARY KEY, user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), last_activity_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ ended_at TIMESTAMPTZ, duration_seconds INTEGER NOT NULL DEFAULT 0 CHECK (duration_seconds >= 0)
+);
+CREATE INDEX IF NOT EXISTS study_sessions_user_started_idx ON study_sessions(user_id, started_at DESC);
 CREATE TABLE IF NOT EXISTS user_preferences (
  user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
  profile_data JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -435,6 +455,13 @@ def save_artifact(user_id: str, kind: str, title: str, payload: dict[str, Any], 
         return result
 
 
+def get_user_artifact(user_id: str, artifact_id: str) -> dict[str, Any] | None:
+    with connection() as conn, conn.cursor(row_factory=psycopg.rows.dict_row) as cursor:
+        cursor.execute("""SELECT id::text, user_id::text, paper_id::text, kind, title, payload, created_at, updated_at
+                       FROM study_artifacts WHERE id = %s AND user_id = %s""", (artifact_id, user_id))
+        return cursor.fetchone()
+
+
 def list_user_data(user_id: str) -> dict[str, Any]:
     with connection() as conn, conn.cursor(row_factory=psycopg.rows.dict_row) as cursor:
         cursor.execute("""SELECT p.id::text, p.filename, p.page_count, p.file_type, p.created_at,
@@ -445,6 +472,14 @@ def list_user_data(user_id: str) -> dict[str, Any]:
         cursor.execute("""SELECT id::text, paper_id::text, kind, title, payload, created_at, updated_at
                        FROM study_artifacts WHERE user_id = %s ORDER BY created_at DESC LIMIT 200""", (user_id,))
         artifacts = list(cursor.fetchall())
+        for artifact in artifacts:
+            if artifact.get("kind") == "quiz" and isinstance(artifact.get("payload"), dict):
+                payload = dict(artifact["payload"])
+                payload["questions"] = [
+                    {key: value for key, value in question.items() if key != "answer"}
+                    for question in payload.get("questions", []) if isinstance(question, dict)
+                ]
+                artifact["payload"] = payload
         cursor.execute("""SELECT id, action, details, created_at FROM activity_events
                        WHERE user_id = %s ORDER BY created_at DESC LIMIT 200""", (user_id,))
         history = list(cursor.fetchall())
@@ -454,7 +489,100 @@ def list_user_data(user_id: str) -> dict[str, Any]:
         cursor.execute("""SELECT id::text, name, paper_ids, artifact_ids, created_at, updated_at
                        FROM research_collections WHERE user_id = %s ORDER BY updated_at DESC""", (user_id,))
         collections = list(cursor.fetchall())
-        return {"papers": papers, "artifacts": artifacts, "chats": chats, "history": history, "collections": collections}
+    return {"papers": papers, "artifacts": artifacts, "chats": chats, "history": history,
+            "collections": collections, "dashboard_metrics": get_dashboard_metrics(user_id)}
+
+
+def get_dashboard_metrics(user_id: str) -> dict[str, int]:
+    """Aggregate current-user learning metrics from persisted records."""
+    with connection() as conn, conn.cursor(row_factory=psycopg.rows.dict_row) as cursor:
+        cursor.execute("""SELECT
+          (SELECT COUNT(*)::int FROM papers p WHERE p.owner_id = %s
+             AND EXISTS (SELECT 1 FROM paper_chunks c WHERE c.paper_id = p.id)) AS papers_available,
+          (SELECT COUNT(*)::int FROM study_artifacts a
+             CROSS JOIN LATERAL jsonb_array_elements(
+               CASE WHEN jsonb_typeof(a.payload->'cards') = 'array' THEN a.payload->'cards' ELSE '[]'::jsonb END
+             ) card WHERE a.user_id = %s AND a.kind = 'flashcards') AS flashcards_total,
+          (SELECT COUNT(*)::int FROM study_artifacts a
+             CROSS JOIN LATERAL jsonb_each_text(
+               CASE WHEN jsonb_typeof(a.payload->'progress'->'card_reviews') = 'object'
+                 THEN a.payload->'progress'->'card_reviews' ELSE '{}'::jsonb END
+             ) review WHERE a.user_id = %s AND a.kind = 'flashcards' AND review.value = 'got-it') AS flashcards_mastered,
+          (SELECT COUNT(*)::int FROM study_artifacts a
+             CROSS JOIN LATERAL jsonb_each_text(
+               CASE WHEN jsonb_typeof(a.payload->'progress'->'card_reviews') = 'object'
+                 THEN a.payload->'progress'->'card_reviews' ELSE '{}'::jsonb END
+             ) review WHERE a.user_id = %s AND a.kind = 'flashcards') AS flashcards_reviewed,
+          (SELECT COUNT(DISTINCT LOWER(BTRIM(COALESCE(
+             (SELECT node->>'label' FROM jsonb_array_elements(
+               CASE WHEN jsonb_typeof(a.payload->'nodes') = 'array' THEN a.payload->'nodes' ELSE '[]'::jsonb END
+             ) node WHERE node->>'id' = 'root' LIMIT 1), a.title
+          ))))::int FROM study_artifacts a WHERE a.user_id = %s AND a.kind = 'mindmap') AS mindmap_topics,
+          (SELECT COALESCE(SUM(duration_seconds), 0)::int FROM study_sessions s
+             WHERE s.user_id = %s AND s.started_at >= date_trunc('week', NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC') AS study_seconds_week""",
+          (user_id, user_id, user_id, user_id, user_id, user_id))
+        return dict(cursor.fetchone() or {})
+
+
+def update_flashcard_reviews(user_id: str, artifact_id: str, reviews: dict[str, str]) -> bool:
+    """Merge review states into a flashcard deck without overwriting other progress."""
+    with connection() as conn, conn.cursor() as cursor:
+        cursor.execute("""UPDATE study_artifacts SET payload = jsonb_set(
+            payload, '{progress}', COALESCE(payload->'progress', '{}'::jsonb) || jsonb_build_object(
+              'card_reviews', COALESCE(payload->'progress'->'card_reviews', '{}'::jsonb) || %s::jsonb
+            ), true), updated_at = NOW()
+            WHERE id = %s AND user_id = %s AND kind = 'flashcards'
+            AND jsonb_typeof(payload->'cards') = 'array'""", (Jsonb(reviews), artifact_id, user_id))
+        updated = cursor.rowcount > 0
+        conn.commit()
+        return updated
+
+
+def start_study_session(user_id: str) -> str:
+    session_id = str(__import__('uuid').uuid4())
+    with connection() as conn, conn.cursor() as cursor:
+        cursor.execute("INSERT INTO study_sessions (id, user_id) VALUES (%s, %s)", (session_id, user_id))
+        conn.commit()
+    return session_id
+
+
+def add_study_session_time(user_id: str, session_id: str, elapsed_seconds: int, end_session: bool = False) -> bool:
+    """Add a bounded visible-page interval to an owned study session."""
+    with connection() as conn, conn.cursor() as cursor:
+        cursor.execute("""UPDATE study_sessions SET duration_seconds = duration_seconds + %s,
+            last_activity_at = NOW(), ended_at = CASE WHEN %s THEN NOW() ELSE ended_at END
+            WHERE id = %s AND user_id = %s AND ended_at IS NULL""",
+            (min(max(int(elapsed_seconds), 0), 60), end_session, session_id, user_id))
+        updated = cursor.rowcount > 0
+        conn.commit()
+        return updated
+
+
+def save_quiz_attempt(user_id: str, artifact_id: str, total: int, correct: int, incorrect: int,
+                      unanswered: int, answers: dict[str, str]) -> dict[str, Any]:
+    attempt_id = str(__import__('uuid').uuid4())
+    percentage = round(correct * 100 / total, 2) if total else 0
+    with connection() as conn, conn.cursor(row_factory=psycopg.rows.dict_row) as cursor:
+        cursor.execute("""INSERT INTO quiz_attempts
+          (id, user_id, artifact_id, total_questions, correct_answers, incorrect_answers, unanswered, percentage, answers)
+          SELECT %s, %s, a.id, %s, %s, %s, %s, %s, %s
+          FROM study_artifacts a WHERE a.id = %s AND a.user_id = %s AND a.kind = 'quiz'
+          ON CONFLICT (artifact_id) DO NOTHING
+          RETURNING id::text, total_questions, correct_answers, incorrect_answers, unanswered, percentage, answers, created_at""",
+          (attempt_id, user_id, total, correct, incorrect, unanswered, percentage, Jsonb(answers), artifact_id, user_id))
+        result = cursor.fetchone()
+        if not result:
+            cursor.execute("""SELECT id::text, total_questions, correct_answers, incorrect_answers, unanswered,
+                          percentage, answers, created_at FROM quiz_attempts
+                          WHERE artifact_id = %s AND user_id = %s""", (artifact_id, user_id))
+            result = cursor.fetchone()
+            if not result:
+                conn.rollback()
+                return {}
+            conn.commit()
+            return {**dict(result), "created": False}
+        conn.commit()
+        return {**dict(result), "created": True}
 
 
 def create_chat_session(user_id: str, title: str, paper_id: str | None) -> dict[str, Any]:

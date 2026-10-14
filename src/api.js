@@ -47,11 +47,18 @@ function readableError(detail) {
 }
 
 export async function apiFetch(path, options = {}) {
+  const { skipDashboardRefresh = false, ...fetchOptions } = options;
   const headers = new Headers(options.headers || {});
   const token = localStorage.getItem("scholarmind_token");
   if (token) headers.set("Authorization", `Bearer ${token}`);
-  const response = await fetch(`${API_BASE}${path}`, { ...options, headers });
-  if (response.status === 204) return null;
+  const response = await fetch(`${API_BASE}${path}`, { ...fetchOptions, headers });
+  if (response.status === 204) {
+    const method = String(fetchOptions.method || "GET").toUpperCase();
+    if (!skipDashboardRefresh && ["POST", "PUT", "PATCH", "DELETE"].includes(method)) {
+      window.dispatchEvent(new Event("scholarmind-data-updated"));
+    }
+    return null;
+  }
   const contentType = response.headers.get("content-type") || "";
   const result = contentType.includes("application/json")
     ? await response.json().catch(() => ({}))
@@ -60,10 +67,17 @@ export async function apiFetch(path, options = {}) {
     const detail = readableError(result?.detail ?? result?.message ?? result?.error ?? result);
     const error = new Error(detail || `Request failed (${response.status})`);
     error.status = response.status;
-    if (response.status === 401 && token && !path.startsWith("/auth/") && localStorage.getItem("scholarmind_token") === token) {
+    const isAuthRequest = /^\/auth\/(login|register)$/.test(path);
+    if (response.status === 401 && token && !isAuthRequest) {
+      const returnTo = `${window.location.pathname}${window.location.search}${window.location.hash}`;
       clearSession();
+      window.location.replace(`/login?expired=1&next=${encodeURIComponent(returnTo)}`);
     }
     throw error;
+  }
+  const method = String(fetchOptions.method || "GET").toUpperCase();
+  if (!skipDashboardRefresh && ["POST", "PUT", "PATCH", "DELETE"].includes(method)) {
+    window.dispatchEvent(new Event("scholarmind-data-updated"));
   }
   return result;
 }

@@ -5,9 +5,11 @@ import { apiFetch, saveSession } from "../api";
 export default function Login() {
   const navigate = useNavigate();
   const location = useLocation();
-  const destination = typeof location.state?.from === "string" && location.state.from.startsWith("/") && !location.state.from.startsWith("//")
+  const searchParams = new URLSearchParams(location.search);
+  const requestedPath = searchParams.get("next");
+  const returnPath = typeof location.state?.from === "string" && location.state.from.startsWith("/") && !location.state.from.startsWith("//")
     ? location.state.from
-    : "/dashboard";
+    : requestedPath?.startsWith("/") && !requestedPath.startsWith("//") ? requestedPath : "/dashboard";
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -33,7 +35,7 @@ export default function Login() {
       body: JSON.stringify({ email, password }),
     }).then((result) => {
       saveSession(result);
-      navigate(destination, { replace: true });
+      navigate(returnPath, { replace: true });
     }).catch((err) => setError(err.message)).finally(() => setLoading(false));
   };
 
@@ -78,6 +80,12 @@ export default function Login() {
                 className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600"
               >
                 {error}
+              </div>
+            )}
+
+            {searchParams.get("expired") === "1" && !error && (
+              <div role="status" className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                Your session expired. Sign in again to continue; your papers and saved work remain in your account.
               </div>
             )}
 
