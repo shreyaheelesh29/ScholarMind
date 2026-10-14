@@ -132,6 +132,8 @@ class MindMapExpansionResponse(BaseModel):
     children: list[MindMapExpansionNode]
     edges: list[MindMapExpansionEdge]
     generation_mode: str = "ai"
+    exhausted: bool = False
+    message: str | None = None
 
 
 class ArtifactUpdate(BaseModel):
@@ -146,6 +148,7 @@ class FlashcardReviewRequest(BaseModel):
 class StudySessionHeartbeatRequest(BaseModel):
     elapsed_seconds: int = Field(ge=0, le=60)
     end_session: bool = False
+    activity_type: str = Field(default="flashcards", pattern="^(flashcards|quiz|mindmap)$")
 
 
 class QuizAttemptRequest(BaseModel):
@@ -413,7 +416,8 @@ def dashboard_metrics(user: dict[str, Any] = Depends(current_user)):
 @app.post("/api/study-sessions/{session_id}/heartbeat")
 def study_session_heartbeat(session_id: str, payload: StudySessionHeartbeatRequest,
                             user: dict[str, Any] = Depends(current_user)):
-    if not add_study_session_time(user["id"], session_id, payload.elapsed_seconds, payload.end_session):
+    if not add_study_session_time(user["id"], session_id, payload.elapsed_seconds, payload.end_session,
+                                  payload.activity_type):
         raise HTTPException(status_code=404, detail="Study session not found or already ended")
     return {"ok": True}
 
@@ -775,6 +779,28 @@ def chat(request: ChatRequest, user: dict[str, Any] = Depends(current_user)):
     return response
 
 
+def _mindmap_output_matches_focus(focus: str, nodes: list[dict[str, Any]]) -> bool:
+    """Make sure a generated map actually follows the requested topic, including paraphrases."""
+    focus_text = re.sub(
+        r"^(?:please\s+)?(?:create|make|generate|build|show|explain|focus(?:\s+on)?|mind\s*map(?:\s+of)?|map\s+out)\s+",
+        "", focus, flags=re.IGNORECASE,
+    ).strip() or focus
+    concepts = [
+        " ".join(str(node.get(field, "")) for field in ("label", "summary", "evidence"))[:700]
+        for node in nodes if isinstance(node, dict) and node.get("id") != "root"
+    ]
+    if len(concepts) < 2:
+        return False
+    vectors = embed([focus_text[:700], *concepts])
+    topic_vector = vectors[0]
+    related_count = sum(
+        sum(left * right for left, right in zip(topic_vector, concept_vector)) >= 0.17
+        for concept_vector in vectors[1:]
+    )
+    required_related = 1 if len(re.findall(r"[a-z0-9]+", focus_text.casefold())) <= 2 else 2
+    return related_count >= required_related
+
+
 @app.post("/api/learning/generate", status_code=201)
 def generate_learning(payload: GenerateRequest, user: dict[str, Any] = Depends(current_user)):
     custom_presentation = payload.kind == "ppt_outline" and payload.presentation_input_type in {"notes", "topic"}
@@ -817,6 +843,8 @@ def generate_learning(payload: GenerateRequest, user: dict[str, Any] = Depends(c
     topic_query = retrieval_topics.get(payload.kind)
     if custom_presentation:
         query = payload.source_text.strip()
+    elif payload.kind == "mindmap" and focus:
+        query = focus
     elif topic_query:
         query = f"{topic_query} {focus} from {paper_names}".strip()
     elif focus:
@@ -825,7 +853,30 @@ def generate_learning(payload: GenerateRequest, user: dict[str, Any] = Depends(c
         query = f"key findings and main ideas from {paper_names}"
     query_embedding = embed_query(query)
     cross_paper_kinds = {"comparison", "literature_review", "research_gap", "research_ideas"}
-    if payload.kind in {"flashcards", "quiz"}:
+    if payload.kind == "mindmap" and focus:
+        # Search for the user's topic directly, then add a couple of close
+        # evidence queries so maps can follow a topic even when the paper uses
+        # different wording from the prompt.
+        focus_queries = [
+            focus,
+            f"{focus} supporting concepts and evidence",
+            f"{focus} mechanisms methods causes outcomes limitations",
+        ]
+        hits = []
+        seen_chunks = set()
+        for focus_query in focus_queries:
+            focus_embedding = query_embedding if focus_query == query else embed_query(focus_query)
+            for hit in hybrid_search(focus_query, focus_embedding, paper_ids, 8, owner_id=user["id"]):
+                chunk_key = (hit["paper_id"], hit.get("chunk_number"), hit["page_number"])
+                if chunk_key in seen_chunks:
+                    continue
+                seen_chunks.add(chunk_key)
+                hits.append(hit)
+                if len(hits) >= 18:
+                    break
+            if len(hits) >= 18:
+                break
+    elif payload.kind in {"flashcards", "quiz"}:
         # Pull evidence from several paper sections so the model has enough
         # distinct facts for the requested study set instead of seeing only
         # passages nearest to one broad query.
@@ -871,15 +922,30 @@ def generate_learning(payload: GenerateRequest, user: dict[str, Any] = Depends(c
         retrieval_limit = min(payload.count * 2, 20) if payload.kind == "quiz" else min(payload.count, 10)
         hits = hybrid_search(query, query_embedding, paper_ids, retrieval_limit, owner_id=user["id"])
     if not hits:
+        if payload.kind == "mindmap" and focus:
+            raise HTTPException(status_code=422, detail=f'The selected paper does not appear to cover "{focus}". Try a topic discussed in the paper.')
         raise HTTPException(status_code=404, detail="No text passages found for this paper")
     try:
         if payload.kind == "mindmap" and focus:
-            stop_words = {"about", "from", "with", "this", "that", "paper", "focus", "map", "mind", "please", "explain", "show", "create", "generate", "the", "and", "for"}
-            topic_terms = {term for term in re.findall(r"[a-z0-9]+", focus.casefold())
-                           if len(term) > 2 and term not in stop_words}
-            evidence_terms = {term for hit in hits for term in re.findall(r"[a-z0-9]+", str(hit.get("content", "")).casefold())}
-            if topic_terms and not topic_terms.intersection(evidence_terms):
-                raise HTTPException(status_code=422, detail=f'The selected paper does not contain evidence for "{focus}". Try a topic covered by the paper.')
+            # Semantic matching accepts synonyms and paraphrases (e.g. a user
+            # asks about "solar power" while the paper says "photovoltaics").
+            topic_text = re.sub(
+                r"^(?:please\s+)?(?:create|make|generate|build|show|explain|focus(?:\s+on)?|mind\s*map(?:\s+of)?|map\s+out)\s+",
+                "", focus, flags=re.IGNORECASE,
+            ).strip() or focus
+            focus_passages = [str(hit.get("content", ""))[:1400] for hit in hits[:12]]
+            focus_vectors = embed([topic_text[:700], *focus_passages])
+            topic_vector = focus_vectors[0]
+            best_similarity = max(
+                (sum(left * right for left, right in zip(topic_vector, passage_vector))
+                 for passage_vector in focus_vectors[1:]),
+                default=0.0,
+            )
+            if best_similarity < 0.18:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f'The selected paper does not appear to cover "{focus}". Try a topic discussed in the paper.',
+                )
         generation_prompt = focus if payload.kind == "mindmap" else query
         content = generate_study_artifact(
             payload.kind, generation_prompt, hits, payload.count, payload.difficulty,
@@ -889,6 +955,11 @@ def generate_learning(payload: GenerateRequest, user: dict[str, Any] = Depends(c
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     if content.get("_generation_mode") == "source_fallback" and payload.kind != "ppt_outline":
         raise HTTPException(status_code=503, detail=content.get("_generation_notice", "AI generation failed. Please try again."))
+    if payload.kind == "mindmap" and focus and not _mindmap_output_matches_focus(focus, content.get("nodes", [])):
+        raise HTTPException(
+            status_code=422,
+            detail=f'The paper has some evidence about "{focus}", but the model could not build a map centered on it. Try a shorter or more specific topic.',
+        )
     if payload.kind == "quiz":
         questions = content.get("questions", [])
         # Shuffle on the server before persistence. The browser receives only
@@ -1023,7 +1094,14 @@ def expand_learning_mindmap(payload: MindMapExpansionRequest, user: dict[str, An
     ])
     hits = hybrid_search(retrieval_query, embed_query(retrieval_query), [payload.paper_id], 12, owner_id=user["id"])
     if not hits:
-        raise HTTPException(status_code=404, detail="No paper passages found for this concept")
+        return {
+            "parent_id": payload.node_id,
+            "children": [],
+            "edges": [],
+            "generation_mode": "source_exhausted",
+            "exhausted": True,
+            "message": "No more relevant, source-supported subtopics were found for this branch.",
+        }
     try:
         return expand_mindmap_node(
             payload.node_id, payload.node_label, payload.breadcrumb, payload.context, existing_nodes, hits,
