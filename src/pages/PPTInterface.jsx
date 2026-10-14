@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { apiFetch, clearSession } from "../api";
 
@@ -36,8 +36,42 @@ export default function PPTInterface() {
   const [draggedIndex, setDraggedIndex] = useState(null);
   const [editingId, setEditingId] = useState(null);
   const [notesExpanded, setNotesExpanded] = useState(true);
+  const slidePreviewRef = useRef(null);
+  const presenterNotesRef = useRef(null);
+  const [previewScroll, setPreviewScroll] = useState({ canScroll: false, atBottom: false });
 
   const slide = slides[current];
+
+  useEffect(() => {
+    const element = slidePreviewRef.current;
+    if (!element) return undefined;
+    const updateScrollState = () => {
+      const next = {
+        canScroll: element.scrollHeight > element.clientHeight + 4,
+        atBottom: element.scrollTop + element.clientHeight >= element.scrollHeight - 8,
+      };
+      setPreviewScroll((previous) => previous.canScroll === next.canScroll && previous.atBottom === next.atBottom ? previous : next);
+    };
+    const mutationObserver = new MutationObserver(updateScrollState);
+    const resizeObserver = new ResizeObserver(updateScrollState);
+    element.addEventListener("scroll", updateScrollState, { passive: true });
+    mutationObserver.observe(element, { childList: true, characterData: true, subtree: true });
+    resizeObserver.observe(element);
+    if (element.firstElementChild) resizeObserver.observe(element.firstElementChild);
+    const frame = requestAnimationFrame(updateScrollState);
+    return () => {
+      cancelAnimationFrame(frame);
+      element.removeEventListener("scroll", updateScrollState);
+      mutationObserver.disconnect();
+      resizeObserver.disconnect();
+    };
+  }, [current, slides, editingId]);
+
+  const scrollPreview = () => {
+    const element = slidePreviewRef.current;
+    if (!element) return;
+    element.scrollTo({ top: previewScroll.atBottom ? 0 : element.scrollTop + element.clientHeight * 0.75, behavior: "smooth" });
+  };
 
   const reportError = (err) => {
     if (err.status === 401) {
@@ -410,9 +444,9 @@ export default function PPTInterface() {
 
         <div className="flex-1 flex flex-col gap-4 min-w-0">
           <div className="flex-1 rounded-2xl bg-gradient-to-br from-indigo-950 via-slate-900 to-slate-950 p-3 sm:p-6 overflow-hidden flex items-center justify-center min-h-[16rem] shadow-lg [container-type:size]">
-            <div className="w-full max-w-4xl aspect-video bg-white rounded-2xl shadow-2xl overflow-hidden flex flex-col min-h-0">
+            <div className="relative w-full max-w-4xl aspect-video bg-white rounded-2xl shadow-2xl overflow-hidden flex flex-col min-h-0">
               <div className={`h-2 bg-gradient-to-r ${slide.gradient} flex-shrink-0`} />
-              <div className="flex-1 min-h-0 overflow-auto bg-slate-50 p-4 sm:p-6">
+              <div ref={slidePreviewRef} tabIndex={0} role="region" aria-label="Slide preview. Scroll inside to read all slide text." className="ppt-preview-scroll flex-1 min-h-0 overflow-y-auto overscroll-y-contain bg-slate-50 p-4 sm:p-6">
                 {slide.type === "empty" && (
                   <div className="flex h-full min-h-[15rem] flex-col items-center justify-center text-center">
                     <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-to-br from-indigo-500 to-fuchsia-500 text-3xl text-white shadow-lg shadow-indigo-200">✦</div>
@@ -636,7 +670,7 @@ export default function PPTInterface() {
                 )}
 
                 {slide.type === "generated" && (
-                  <div className="flex h-full flex-col">
+                  <div className="flex min-h-full flex-col">
                     <div className="mb-3 border-b-2 border-slate-100 pb-2 sm:mb-4 sm:pb-3"><span className="text-[10px] sm:text-xs font-black uppercase tracking-wider text-primary-600">{slide.pages?.length > 1 ? `Source pages ${slide.pages.join(", ")}` : slide.page ? `Source page ${slide.page}` : pptArtifact?.payload?.presentation_input_type === "notes" ? "From your notes • no page citation" : pptArtifact?.payload?.presentation_input_type === "topic" ? "Topic overview • no page citation" : "Presentation preview"}</span><h2 className="mt-1 text-xl sm:text-2xl lg:text-3xl font-black leading-tight text-slate-900 break-words">{slide.title}</h2></div>
                     {editingId === slide.id ? (
                       <textarea
@@ -649,7 +683,7 @@ export default function PPTInterface() {
                         placeholder="One point per line"
                       />
                     ) : (
-                      <ul className="flex-1 space-y-2 overflow-auto">{slide.bullets.map((bullet, i) => <li key={i} className="rounded-xl border border-slate-100 bg-white/80 p-2 sm:p-3 text-sm sm:text-base font-medium text-slate-800 break-words">{bullet}</li>)}</ul>
+                      <ul className="flex-1 space-y-2 overflow-visible">{slide.bullets.map((bullet, i) => <li key={i} className="rounded-xl border border-slate-100 bg-white/80 p-2 sm:p-3 text-sm sm:text-base font-medium text-slate-800 break-words">{bullet}</li>)}</ul>
                     )}
                   </div>
                 )}
@@ -660,14 +694,22 @@ export default function PPTInterface() {
                   {current + 1} / {slides.length}
                 </span>
               </div>
+              {slide.type === "generated" && <div className="absolute bottom-11 right-3 z-10 flex flex-wrap justify-end gap-2">
+                {previewScroll.canScroll && <button type="button" onClick={scrollPreview} className="rounded-full border border-slate-300 bg-white/95 px-3 py-1.5 text-xs font-bold text-slate-800 shadow-md hover:bg-white focus:outline-none focus:ring-2 focus:ring-primary-500">
+                  {previewScroll.atBottom ? "↑ Back to top" : "↓ Scroll to read more"}
+                </button>}
+                <button type="button" onClick={() => presenterNotesRef.current?.scrollIntoView({ behavior: "smooth", block: "center" })} className="rounded-full bg-primary-600 px-3 py-1.5 text-xs font-bold text-white shadow-md hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-primary-300">
+                  Presenter notes ↓
+                </button>
+              </div>}
             </div>
           </div>
 
-          {slide.type === "generated" && <section className="overflow-hidden rounded-xl border border-indigo-100 bg-white shadow-sm">
+          {slide.type === "generated" && <section ref={presenterNotesRef} className="scroll-mt-24 overflow-hidden rounded-xl border border-indigo-100 bg-white shadow-sm">
             <div className="flex items-center justify-between gap-3 px-4 py-3">
               <div className="min-w-0">
                 <h3 className="text-sm font-extrabold text-slate-900">Presenter notes <span className="font-medium text-slate-500">· Slide {current + 1}</span></h3>
-                <p className="mt-0.5 text-xs text-slate-500">Private speaking prompts; these appear in the exported PowerPoint notes.</p>
+                <p className="mt-0.5 text-xs text-slate-500">A slide-specific speaking script. Edit it here or read it from the exported PowerPoint notes.</p>
               </div>
               <button type="button" aria-expanded={notesExpanded} onClick={() => setNotesExpanded((expanded) => !expanded)} className="shrink-0 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-bold text-indigo-700 transition hover:border-indigo-200 hover:bg-indigo-50">
                 {notesExpanded ? "Hide notes" : "Show notes"} <span aria-hidden="true">{notesExpanded ? "⌃" : "⌄"}</span>
@@ -679,8 +721,8 @@ export default function PPTInterface() {
                 value={slide.speakerNotes || ""}
                 onChange={(event) => setSlides((existing) => existing.map((item, i) => i === current ? { ...item, speakerNotes: event.target.value } : item))}
                 onBlur={(event) => savePresenterNotes(event.target.value)}
-                rows={4}
-                placeholder="Add the explanation, transitions, or reminders you want to see while presenting…"
+                rows={6}
+                placeholder="Write what you plan to say: explain the slide’s key point, connect the evidence, and transition to the next slide…"
                 className="mt-3 w-full resize-y rounded-xl border border-slate-200 bg-slate-50 px-3 py-3 text-sm leading-relaxed text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-indigo-300 focus:bg-white focus:ring-4 focus:ring-indigo-100"
               />
             </div>}

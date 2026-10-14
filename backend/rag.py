@@ -106,6 +106,22 @@ def _spread_hits(hits: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]
     return [hits[i] for i in sorted(indexes)]
 
 
+def _presentation_speaker_notes(content: list[str]) -> str:
+    """Turn verified slide points into a short, speakable presenter script."""
+    points = [
+        re.sub(r"^(?:context|question|approach|method|finding|key findings|result|takeaway)\s*:\s*", "", point, flags=re.IGNORECASE).strip()
+        for point in content if isinstance(point, str) and point.strip()
+    ]
+    if not points:
+        return ""
+    cues = [f"Open this slide by explaining that {points[0].rstrip('.')}."]
+    if len(points) > 1:
+        cues.append(f"Then explain how this connects to the next point: {points[1].rstrip('.')}.")
+    if len(points) > 2:
+        cues.append(f"Close by emphasizing: {points[-1].rstrip('.')}.")
+    return " ".join(cues)
+
+
 def _presentation_source_fallback(hits: list[dict[str, Any]], count: int, notice: str) -> dict[str, Any]:
     """Build a concise, organized source-only deck when structured AI output fails."""
     generic_sections = {"", "document text", "text", "abstract", "unknown", "untitled", "page"}
@@ -119,32 +135,39 @@ def _presentation_source_fallback(hits: list[dict[str, Any]], count: int, notice
     grouped: dict[tuple[str, Any], dict[str, Any]] = {}
     sentence_seen: set[str] = set()
     for hit in hits:
-        source = re.sub(r"\s+", " ", str(hit.get("content", ""))).strip()
-        if not source:
+        raw_source = str(hit.get("content", "")).replace("\r\n", "\n").replace("\r", "\n").strip()
+        if not raw_source:
             continue
         section = re.sub(r"\s+", " ", str(hit.get("section") or "")).strip(" .:-")
         normalized_section = re.sub(r"[^a-z0-9]+", " ", section.casefold()).strip()
         if re.fullmatch(r"input\s+\d+", normalized_section):
             normalized_section = ""
-        for sentence in re.split(r"(?<=[.!?])\s+|\s*[;|]\s*", source):
-            bullet = sentence.strip(" •-\t")
-            normalized = re.sub(r"\W+", " ", bullet.casefold()).strip()
-            if len(bullet) < 35 or len(normalized) < 30 or normalized in sentence_seen:
-                continue
-            sentence_seen.add(normalized)
-            if normalized_section in generic_sections or len(normalized_section) < 3:
-                text = bullet.casefold()
-                scores = [(sum(text.count(word) for word in words), label) for words, label in categories]
-                score, title = max(scores, default=(0, "Study overview"))
-                if score == 0:
-                    title = "Study overview"
-            else:
-                title = section[:100]
-            page = hit.get("page_number")
-            group = grouped.setdefault((title, page), {"title": title, "content": [], "page": page})
-            if len(group["content"]) >= 4:
-                continue
-            group["content"].append(bullet[:260])
+        for sentence in re.split(r"\n+|(?<=[.!?])\s+|\s*[;|]\s*|\s*•\s*", raw_source):
+            sentence = re.sub(r"\s+", " ", sentence).strip(" •-\t")
+            while sentence:
+                bullet = sentence[:250]
+                if len(sentence) > 250:
+                    split_at = bullet.rfind(" ")
+                    if split_at >= 150:
+                        bullet = sentence[:split_at]
+                sentence = sentence[len(bullet):].lstrip()
+                normalized = re.sub(r"\W+", " ", bullet.casefold()).strip()
+                if len(bullet) < 35 or len(normalized) < 30 or normalized in sentence_seen:
+                    continue
+                sentence_seen.add(normalized)
+                if normalized_section in generic_sections or len(normalized_section) < 3:
+                    text = bullet.casefold()
+                    scores = [(sum(text.count(word) for word in words), label) for words, label in categories]
+                    score, title = max(scores, default=(0, "Study overview"))
+                    if score == 0:
+                        title = "Study overview"
+                else:
+                    title = section[:100]
+                page = hit.get("page_number")
+                group = grouped.setdefault((title, page), {"title": title, "content": [], "page": page})
+                if len(group["content"]) >= 4:
+                    continue
+                group["content"].append(bullet)
 
     slides = [group for group in grouped.values() if group["content"]]
     title_counts: dict[str, int] = {}
@@ -155,8 +178,7 @@ def _presentation_source_fallback(hits: list[dict[str, Any]], count: int, notice
             item["title"] = f"{item['title']} · p. {item['page']}"
     slides = slides[:max(1, min(count, 12))]
     for slide in slides:
-        lead = slide["content"][0].rstrip(" .")
-        slide["speaker_notes"] = f"Explain this source point in your own words: {lead}. Then connect it to the next section."
+        slide["speaker_notes"] = _presentation_speaker_notes(slide["content"])
     return {"slides": slides, "_generation_mode": "source_fallback", "_generation_notice": notice}
 
 
@@ -495,14 +517,14 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
         task_instructions["ppt_outline"] = (
             f"Create up to {generation_count} useful slides as {purpose_guidance}, using the selected slide count as a maximum. "
             "Give each slide a distinct, audience-appropriate title and concise presentation-ready content, usually 2-5 short bullets. "
-            "Sequence the slides into a coherent story rather than copying source headings. Add brief spoken presenter notes that explain or connect the bullets. "
+            "Sequence the slides into a coherent story rather than copying source headings. Write speaker_notes as a natural 40-70 word spoken script that explains the points and transitions naturally. Keep it source-grounded; do not just copy bullets or add outside facts. "
             "For paper input, include the supporting source page number on each slide and use only pages shown in the passages. Preserve coverage of the distinct sections and findings represented across the full source. "
             "For notes or topic input, set page to null. Do not fabricate citations. Return the requested JSON structure."
         )
         if local_ollama:
             task_instructions["ppt_outline"] = (
                 f"Create up to {generation_count} slides, ordered as a clear story for {purpose_guidance}. "
-                "Return at least one useful slide; never return an empty slides array. Use 2-4 concise bullets and short presenter notes per slide. "
+                "Return at least one useful slide; never return an empty slides array. Use 2-4 concise bullets and write speaker_notes as a natural 40-70 word spoken script that explains this slide and transitions to the next. Do not merely repeat the bullets or add outside facts. "
                 "Use distinct titles, do not repeat source headings as slide titles, and do not duplicate a point. "
                 "Use only supplied source facts. Prefer the source's technical terms so each bullet can be matched to evidence. "
                 "Use a supplied page number for paper claims and null for notes or topic input."
@@ -523,7 +545,7 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
         if kind == "ppt_outline":
             # Ollama's context window includes both prompt and completion; keep
             # the structured deck small enough for Qwen to finish its JSON.
-            generation_tokens["ppt_outline"] = min(1200, max(700, generation_count * 150))
+            generation_tokens["ppt_outline"] = min(1600, max(900, generation_count * 210))
     context_chars = (({"simple": 300, "medium": 400, "hard": 500}.get(difficulty, 400)
                       if kind == "quiz" else 750 if kind == "mindmap" else 500)
                      if local_ollama else 1300) if kind in {"flashcards", "mindmap", "quiz", "visualization", "viva"} else 1800
@@ -1291,8 +1313,8 @@ def _validate_study_artifact(kind: str, result: Any, hits: list[dict[str, Any]])
             # Keep notes useful without preserving model elaborations that go
             # beyond the evidence. A validated slide point is a safe speaker cue.
             note_numbers = set(re.findall(r"\b\d+(?:\.\d+)?%?\b", notes))
-            if notes and ((note_numbers - source_numbers) or not claim_support(notes, minimum_ratio=0.55)[0]):
-                notes = "Presenter cues:\n" + "\n".join(f"- {point}" for point in content[:3])
+            if not notes or (note_numbers - source_numbers) or not claim_support(notes, minimum_ratio=0.55)[0]:
+                notes = _presentation_speaker_notes(content)
             slide["content"] = content
             slide["speaker_notes"] = notes
             if not allowed_pages:
