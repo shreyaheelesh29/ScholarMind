@@ -67,12 +67,16 @@ function OutputValue({ value }) {
   return <div className="space-y-2">{entries.map(([key, item]) => <div key={key}><p className="mb-0.5 text-xs font-bold uppercase tracking-wide text-slate-500">{key.replaceAll("_", " ")}</p><OutputValue value={item} /></div>)}{value.speaker_notes && <div className="border-l-2 border-primary-300 pl-3"><p className="text-xs font-bold uppercase tracking-wide text-primary-700">Presenter notes</p><p className="mt-1 text-sm text-slate-700">{value.speaker_notes}</p></div>}</div>;
 }
 
-export default function ArtifactGenerator({ kinds, heading = "Generate from your paper", multiPaper = false, id, initialPaperId = "", initialPaperIds = [], maxPapers = 10, minPapers = 1, promptContext = "", promptPlaceholder = "Optional focus or topic", renderPayload, onQuizGenerated }) {
+export default function ArtifactGenerator({ kinds, heading = "Generate from your paper", multiPaper = false, id, initialPaperId = "", initialPaperIds = [], maxPapers = 10, minPapers = 1, promptContext = "", promptPlaceholder = "Optional focus or topic", renderPayload, onQuizGenerated, quizCount, onQuizCountChange, quizDifficulty, onQuizDifficultyChange }) {
   const [papers, setPapers] = useState([]);
   const [paperIds, setPaperIds] = useState([]);
   const [kind, setKind] = useState(kinds[0]);
-  const [count, setCount] = useState("8");
-  const [difficulty, setDifficulty] = useState("medium");
+  const [localCount, setLocalCount] = useState("8");
+  const [localDifficulty, setLocalDifficulty] = useState("medium");
+  const count = quizCount ?? localCount;
+  const setCount = onQuizCountChange ?? setLocalCount;
+  const difficulty = quizDifficulty ?? localDifficulty;
+  const setDifficulty = onQuizDifficultyChange ?? setLocalDifficulty;
   const [prompt, setPrompt] = useState("");
   const [artifact, setArtifact] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -96,7 +100,7 @@ export default function ArtifactGenerator({ kinds, heading = "Generate from your
     event.preventDefault();
     if (paperIds.length < minPapers) { setError(`Select at least ${minPapers} uploaded papers before generating this material.`); return; }
     const questionCount = Number(count);
-    if (kind === "quiz" && (!Number.isInteger(questionCount) || questionCount < 3 || questionCount > 20)) { setError("Enter a whole number from 3 to 20."); return; }
+    if (kind === "quiz" && (!Number.isInteger(questionCount) || questionCount < 1 || questionCount > 20)) { setError("Enter a whole number from 1 to 20."); return; }
     setLoading(true); setError(""); setArtifact(null);
     try {
       const result = await apiFetch("/learning/generate", {
@@ -116,7 +120,7 @@ export default function ArtifactGenerator({ kinds, heading = "Generate from your
       <select aria-label="Material type" value={kind} onChange={(e) => setKind(e.target.value)} disabled={loading} className="rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700">
         {kinds.map((value) => <option key={value} value={value}>{labels[value] || value}</option>)}
       </select>
-      {kind === "quiz" && <label className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700">Questions<input aria-label="Number of quiz questions" type="number" min={3} max={20} step={1} required value={count} onChange={(e) => setCount(e.target.value)} disabled={loading} className="w-20 rounded-md border border-slate-200 px-2 py-1" /></label>}
+      {kind === "quiz" && <label className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700">Questions<input aria-label="Number of quiz questions" type="number" min={1} max={20} step={1} required value={count} onChange={(e) => setCount(e.target.value)} disabled={loading} className="w-20 rounded-md border border-slate-200 px-2 py-1" /></label>}
       {kind === "quiz" && <label className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700">Level<select aria-label="Quiz difficulty" value={difficulty} onChange={(e) => setDifficulty(e.target.value)} disabled={loading} className="rounded-md border border-slate-200 px-2 py-1"><option value="simple">Simple</option><option value="medium">Medium</option><option value="hard">Hard</option></select></label>}
       <button type="submit" aria-busy={loading} disabled={paperIds.length < minPapers || loading || loadingPapers} className="rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50">{loading ? "Generating…" : kind === "quiz" ? `Generate ${count} ${difficulty} questions` : `Generate ${labels[kind] || "material"}`}</button>
       <input value={prompt} onChange={(e) => setPrompt(e.target.value)} maxLength={1000} placeholder={promptPlaceholder} className="rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm md:col-span-4" />

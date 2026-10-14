@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import hashlib
+import random
 import shutil
 import uuid
 from functools import lru_cache
@@ -27,7 +28,9 @@ from database import (create_user, find_user_by_email, get_paper, get_user, hybr
                       save_paper_annotation, delete_paper_annotation,
                       save_chat_message, save_chunks, save_paper_if_unique, sync_admin_emails,
                       find_duplicate_paper, delete_user_collection, list_user_collections,
-                      save_user_collection, update_user_collection, user_owns_artifacts)
+                       save_user_collection, update_user_collection, user_owns_artifacts,
+                       update_flashcard_reviews, start_study_session, add_study_session_time,
+                       save_quiz_attempt, get_user_artifact, get_dashboard_metrics)
 from rag import (ai_provider_status, answer, citations_for, embed, embed_query,
                  expand_mindmap_node, generate_study_artifact)
 from document_processor import extract_text
@@ -125,6 +128,19 @@ class MindMapExpansionResponse(BaseModel):
 class ArtifactUpdate(BaseModel):
     title: str | None = Field(default=None, max_length=200)
     payload: dict[str, Any] | None = None
+
+
+class FlashcardReviewRequest(BaseModel):
+    reviews: dict[str, str] = Field(min_length=1, max_length=20)
+
+
+class StudySessionHeartbeatRequest(BaseModel):
+    elapsed_seconds: int = Field(ge=0, le=60)
+    end_session: bool = False
+
+
+class QuizAttemptRequest(BaseModel):
+    answers: dict[str, str] = Field(default_factory=dict, max_length=20)
 
 
 class PaperAnnotationRequest(BaseModel):
@@ -361,6 +377,23 @@ def remove_collection(collection_id: str, user: dict[str, Any] = Depends(current
     if not delete_user_collection(user["id"], collection_id):
         raise HTTPException(status_code=404, detail="Collection not found")
     return Response(status_code=204)
+
+@app.post("/api/study-sessions", status_code=201)
+def begin_study_session(user: dict[str, Any] = Depends(current_user)):
+    return {"session_id": start_study_session(user["id"])}
+
+
+@app.get("/api/dashboard/metrics")
+def dashboard_metrics(user: dict[str, Any] = Depends(current_user)):
+    return get_dashboard_metrics(user["id"])
+
+
+@app.post("/api/study-sessions/{session_id}/heartbeat")
+def study_session_heartbeat(session_id: str, payload: StudySessionHeartbeatRequest,
+                            user: dict[str, Any] = Depends(current_user)):
+    if not add_study_session_time(user["id"], session_id, payload.elapsed_seconds, payload.end_session):
+        raise HTTPException(status_code=404, detail="Study session not found or already ended")
+    return {"ok": True}
 
 
 @app.get("/api/settings")
@@ -748,31 +781,171 @@ def generate_learning(payload: GenerateRequest, user: dict[str, Any] = Depends(c
         query = f"key findings and main ideas from {paper_names}"
     query_embedding = embed_query(query)
     cross_paper_kinds = {"comparison", "literature_review", "research_gap", "research_ideas"}
-    if payload.kind in cross_paper_kinds and len(paper_ids) > 1:
+    if payload.kind in {"flashcards", "quiz"}:
+        # Pull evidence from several paper sections so the model has enough
+        # distinct facts for the requested study set instead of seeing only
+        # passages nearest to one broad query.
+        focus_terms = f"{focus} {paper_names}".strip()
+        retrieval_queries = [
+            f"definitions terminology concepts background motivation {focus_terms}",
+            f"methods methodology materials procedures design {focus_terms}",
+            f"results findings evidence measurements outcomes {focus_terms}",
+            f"discussion limitations conclusions implications {focus_terms}",
+        ]
+        # Share the evidence budget across all four facets; a large per-query
+        # limit otherwise fills the cap with definitions and methods before
+        # results or discussion can contribute.
+        # Flashcards need a broad enough evidence pool for the source-based
+        # completion path to reach the requested count, especially for large
+        # decks. Quiz generation keeps a smaller per-facet budget.
+        per_query_limit = (6 if payload.kind == "flashcards"
+                           else min(max((payload.count + 3) // 4, 4), 8))
+        if payload.kind == "quiz" and payload.variation_seed:
+            query_offset = sum(ord(character) for character in payload.variation_seed) % len(retrieval_queries)
+            retrieval_queries = retrieval_queries[query_offset:] + retrieval_queries[:query_offset]
+        hits = []
+        seen_chunks = set()
+        for retrieval_query in retrieval_queries:
+            retrieval_embedding = query_embedding if retrieval_query == query else embed_query(retrieval_query)
+            for hit in hybrid_search(retrieval_query, retrieval_embedding, paper_ids, per_query_limit, owner_id=user["id"]):
+                chunk_key = (hit["paper_id"], hit.get("chunk_number"), hit["page_number"])
+                if chunk_key in seen_chunks:
+                    continue
+                seen_chunks.add(chunk_key)
+                hits.append(hit)
+                if len(hits) >= 32:
+                    break
+            if len(hits) >= 32:
+                break
+    elif payload.kind in cross_paper_kinds and len(paper_ids) > 1:
         # Retrieve independently per selected paper so a single document cannot crowd out the others.
         per_paper_limit = max(1, min(4, payload.count // len(paper_ids)))
         hits = []
         for selected_id in paper_ids:
             hits.extend(hybrid_search(query, query_embedding, [selected_id], per_paper_limit, owner_id=user["id"]))
     else:
-        retrieval_limit = min(payload.count * 2, 20) if payload.kind == "quiz" else min(max(payload.count, 6), 10) if payload.kind == "flashcards" else min(payload.count, 10)
+        retrieval_limit = min(payload.count * 2, 20) if payload.kind == "quiz" else min(payload.count, 10)
         hits = hybrid_search(query, query_embedding, paper_ids, retrieval_limit, owner_id=user["id"])
     if not hits:
         raise HTTPException(status_code=404, detail="No text passages found for this paper")
     try:
+        if payload.kind == "mindmap" and focus:
+            stop_words = {"about", "from", "with", "this", "that", "paper", "focus", "map", "mind", "please", "explain", "show", "create", "generate", "the", "and", "for"}
+            topic_terms = {term for term in re.findall(r"[a-z0-9]+", focus.casefold())
+                           if len(term) > 2 and term not in stop_words}
+            evidence_terms = {term for hit in hits for term in re.findall(r"[a-z0-9]+", str(hit.get("content", "")).casefold())}
+            if topic_terms and not topic_terms.intersection(evidence_terms):
+                raise HTTPException(status_code=422, detail=f'The selected paper does not contain evidence for "{focus}". Try a topic covered by the paper.')
+        generation_prompt = focus if payload.kind == "mindmap" else query
         content = generate_study_artifact(
-            payload.kind, query, hits, payload.count, payload.difficulty,
+            payload.kind, generation_prompt, hits, payload.count, payload.difficulty,
             avoid_questions=payload.avoid_questions, variation_seed=payload.variation_seed,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     if content.get("_generation_mode") == "source_fallback":
         raise HTTPException(status_code=503, detail=content.get("_generation_notice", "AI generation failed. Please try again."))
+    if payload.kind == "quiz":
+        questions = content.get("questions", [])
+        # Shuffle on the server before persistence. The browser receives only
+        # options; answer keys stay in the database until quiz submission.
+        for question in content.get("questions", []):
+            options = question.get("options") if isinstance(question, dict) else None
+            answer_index = question.get("answer") if isinstance(question, dict) else None
+            if isinstance(options, list) and type(answer_index) is int and 0 <= answer_index < len(options):
+                correct_option = options[answer_index]
+                shuffled_options = list(options)
+                random.shuffle(shuffled_options)
+                question["options"] = shuffled_options
+                question["answer"] = shuffled_options.index(correct_option)
     kind_title = payload.kind.replace("_", " ").title()
     artifact_title = (f"{kind_title}: {focus}" if focus else f"{kind_title} from {paper_names}")[:200]
     artifact = save_artifact(user["id"], payload.kind, artifact_title, {**content, "citations": citations_for(hits), "source_paper_ids": paper_ids}, paper_ids[0])
     record_activity(user["id"], f"generated_{payload.kind}", {"artifact_id": artifact["id"], "paper_ids": paper_ids})
+    if payload.kind == "quiz":
+        public_payload = dict(artifact["payload"])
+        public_payload["questions"] = [
+            {key: value for key, value in question.items() if key != "answer"}
+            for question in public_payload.get("questions", [])
+        ]
+        artifact = {**artifact, "payload": public_payload}
     return {"artifact": artifact}
+
+
+@app.post("/api/artifacts/{artifact_id}/flashcard-reviews")
+def save_flashcard_reviews(artifact_id: str, payload: FlashcardReviewRequest,
+                           user: dict[str, Any] = Depends(current_user)):
+    artifact = get_user_artifact(user["id"], artifact_id)
+    if not artifact or artifact["kind"] != "flashcards":
+        raise HTTPException(status_code=404, detail="Flashcard deck not found")
+    cards = artifact.get("payload", {}).get("cards", [])
+    for index, rating in payload.reviews.items():
+        if not index.isdecimal() or int(index) >= len(cards):
+            raise HTTPException(status_code=422, detail="A reviewed flashcard was not found in this deck")
+        if rating not in {"again", "hard", "got-it"}:
+            raise HTTPException(status_code=422, detail="Flashcard rating must be Again, Hard, or Got It")
+    if not update_flashcard_reviews(user["id"], artifact_id, payload.reviews):
+        raise HTTPException(status_code=404, detail="Flashcard deck not found")
+    record_activity(user["id"], "reviewed_flashcard", {"artifact_id": artifact_id, "reviews": len(payload.reviews)})
+    return {"ok": True}
+
+
+@app.post("/api/quizzes/{artifact_id}/attempts", status_code=201)
+def submit_quiz_attempt(artifact_id: str, payload: QuizAttemptRequest,
+                        user: dict[str, Any] = Depends(current_user)):
+    artifact = get_user_artifact(user["id"], artifact_id)
+    if not artifact or artifact["kind"] != "quiz":
+        raise HTTPException(status_code=404, detail="Quiz not found")
+    questions = artifact.get("payload", {}).get("questions", [])
+    if not isinstance(questions, list) or not questions:
+        raise HTTPException(status_code=422, detail="This quiz has no questions to submit")
+    correct = 0
+    validated_answers: dict[str, str] = {}
+    for question_index, question in enumerate(questions):
+        options = question.get("options", [])
+        answer_index = question.get("answer")
+        if not isinstance(options, list) or type(answer_index) is not int or not 0 <= answer_index < len(options):
+            raise HTTPException(status_code=422, detail="This quiz contains an invalid answer key")
+        selected = payload.answers.get(str(question_index))
+        if selected is not None and selected not in options:
+            raise HTTPException(status_code=422, detail="Choose one of the listed answer options")
+    for question_index, selected in payload.answers.items():
+        if not question_index.isdecimal() or int(question_index) >= len(questions):
+            raise HTTPException(status_code=422, detail="An answer refers to a question that is not in this quiz")
+        question = questions[int(question_index)]
+        options = question.get("options", [])
+        if not isinstance(selected, str) or selected not in options:
+            raise HTTPException(status_code=422, detail="Choose one of the listed answer options")
+        answer_index = question.get("answer")
+        if not isinstance(answer_index, int) or not 0 <= answer_index < len(options):
+            raise HTTPException(status_code=422, detail="This quiz contains an invalid answer key")
+        validated_answers[question_index] = selected
+        if selected == options[answer_index]:
+            correct += 1
+    total = len(questions)
+    unanswered = total - len(validated_answers)
+    incorrect = len(validated_answers) - correct
+    attempt = save_quiz_attempt(user["id"], artifact_id, total, correct, incorrect, unanswered, validated_answers)
+    if not attempt:
+        raise HTTPException(status_code=404, detail="Quiz not found")
+    attempt_answers = attempt.pop("answers", {})
+    created = attempt.pop("created", False)
+    question_results = []
+    for question_index, question in enumerate(questions):
+        options = question["options"]
+        answer_index = question["answer"]
+        correct_option = options[answer_index]
+        selected = attempt_answers.get(str(question_index))
+        question_results.append({
+            "question_index": question_index,
+            "selected_answer": selected,
+            "correct_answer": correct_option,
+            "is_correct": selected == correct_option,
+            "explanation": question.get("explanation", ""),
+        })
+    if created:
+        record_activity(user["id"], "submitted_quiz", {"artifact_id": artifact_id, "attempt_id": attempt["id"], "percentage": float(attempt["percentage"])})
+    return {"attempt": {**attempt, "questions": question_results}}
 
 
 @app.post("/api/learning/mindmap/expand", response_model=MindMapExpansionResponse)

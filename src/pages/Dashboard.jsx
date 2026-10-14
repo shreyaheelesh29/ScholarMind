@@ -21,6 +21,13 @@ function ago(value) {
   return date.toLocaleDateString();
 }
 
+function formatStudyTime(seconds = 0) {
+  const totalMinutes = Math.floor(Math.max(0, Number(seconds) || 0) / 60);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return hours ? `${hours}h ${minutes}m` : `${minutes}m`;
+}
+
 export default function Dashboard() {
   const [data, setData] = useState(null);
   const [error, setError] = useState("");
@@ -45,19 +52,27 @@ export default function Dashboard() {
       }
     };
     load();
-    const timer = window.setInterval(() => {
-      if (document.visibilityState === "visible") load();
-    }, 30000);
-    return () => { alive = false; window.clearInterval(timer); };
+    const refreshWhenVisible = () => { if (document.visibilityState === "visible") load(); };
+    window.addEventListener("scholarmind-data-updated", load);
+    window.addEventListener("focus", refreshWhenVisible);
+    return () => {
+      alive = false;
+      window.removeEventListener("scholarmind-data-updated", load);
+      window.removeEventListener("focus", refreshWhenVisible);
+    };
   }, []);
 
   const stats = useMemo(() => {
     const artifacts = data?.artifacts || [];
+    const metrics = data?.dashboard_metrics || {};
+    const totalCards = Number(metrics.flashcards_total) || 0;
+    const masteredCards = Number(metrics.flashcards_mastered) || 0;
+    const masteredPercent = totalCards ? Math.round((masteredCards / totalCards) * 100) : 0;
     return [
-      { title: "Papers", value: data?.papers?.length ?? "—", description: "In your library" },
-      { title: "Analyses", value: artifacts.length, description: "Saved AI materials" },
-      { title: "Research Ideas", value: artifacts.filter((item) => item.kind === "research_ideas").length, description: "Generated from your sources" },
-      { title: "Presentations", value: artifacts.filter((item) => item.kind === "ppt_outline").length, description: "Saved slide outlines" },
+      { title: "Flashcards Mastered", value: `${masteredPercent}%`, description: `${masteredCards} mastered of ${totalCards} available` },
+      { title: "Papers Available", value: metrics.papers_available ?? data?.papers?.filter((paper) => paper.chunk_count > 0).length ?? "—", description: "Successfully processed in your library" },
+      { title: "Mind Map Topics", value: metrics.mindmap_topics ?? artifacts.filter((item) => item.kind === "mindmap").length, description: "Unique saved topics" },
+      { title: "Study Time", value: formatStudyTime(metrics.study_seconds_week), description: "This week · UTC" },
     ];
   }, [data]);
 
