@@ -5,15 +5,11 @@ import { apiFetch, clearSession } from "../api";
 const initialSlides = [
   {
     id: 1,
-    type: "generated",
-    label: "Presentation preview",
-    icon: "✨",
-    title: "Your slides will appear here",
-    bullets: [
-      "Choose a research paper, paste your notes, or enter a topic.",
-      "Select the presentation purpose and slide count.",
-      "Generate your deck when you are ready.",
-    ],
+    type: "empty",
+    label: "Start a deck",
+    icon: "✦",
+    title: "Your next presentation starts here",
+    bullets: [],
     speakerNotes: "",
     gradient: "from-indigo-500 to-purple-500",
   },
@@ -48,7 +44,10 @@ export default function PPTInterface() {
       setGenerationError("Your session has expired. Sign in again to continue.");
       return;
     }
-    setGenerationError(err.message);
+    const detail = String(err.message || "");
+    setGenerationError(/presentation did not contain any slides/i.test(detail)
+      ? "The backend is still running an older PPT generator. Restart ScholarMind’s backend, then retry generation."
+      : detail);
   };
 
   const persistSlideEdits = (nextSlides) => {
@@ -91,6 +90,21 @@ export default function PPTInterface() {
   }, []);
 
   const go = (dir) => setCurrent((i) => Math.max(0, Math.min(slides.length - 1, i + dir)));
+
+  useEffect(() => {
+    const onKeyDown = (event) => {
+      if (["INPUT", "TEXTAREA", "SELECT"].includes(event.target?.tagName) || event.target?.isContentEditable) return;
+      if (event.key === "ArrowLeft") go(-1);
+      if (event.key === "ArrowRight") go(1);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [slides.length]);
+
+  const chooseSource = (type) => {
+    setInputType(type);
+    document.getElementById("ppt-source")?.scrollIntoView({ behavior: "smooth", block: "center" });
+  };
 
   const handleGenerate = async () => {
     if (inputType === "paper" && !selectedPaperId) { setGenerationError("Upload a paper first, then select it above."); return; }
@@ -218,7 +232,7 @@ export default function PPTInterface() {
 
   return (
     <div className="min-h-[calc(100vh-7rem)] flex flex-col gap-4 animate-fade-in">
-      <div className="flex items-start justify-between gap-4 flex-wrap">
+      <div id="ppt-source" className="flex items-start justify-between gap-4 flex-wrap scroll-mt-24">
         <div>
           <p className="text-sm font-medium text-primary-600">Output & Learning</p>
           <h1 className="mt-1 text-3xl font-bold text-slate-900">PPT Generator</h1>
@@ -260,7 +274,11 @@ export default function PPTInterface() {
 
       {generationError && <div role="alert" className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
         <span>{generationError}</span>
-        {authExpired && <button type="button" onClick={() => { clearSession(); navigate("/login", { state: { from: "/ppt" } }); }} className="shrink-0 rounded-lg bg-red-700 px-4 py-2 font-bold text-white transition hover:bg-red-800">Sign in again</button>}
+        <div className="flex items-center gap-2">
+          {!authExpired && <button type="button" onClick={handleGenerate} disabled={generating} className="rounded-lg border border-red-300 bg-white px-3 py-1.5 font-bold hover:bg-red-100 disabled:opacity-50">Retry</button>}
+          {authExpired && <button type="button" onClick={() => { clearSession(); navigate("/login", { state: { from: "/ppt" } }); }} className="shrink-0 rounded-lg bg-red-700 px-4 py-2 font-bold text-white transition hover:bg-red-800">Sign in again</button>}
+          <button type="button" aria-label="Dismiss error" onClick={() => setGenerationError("")} className="rounded-md p-1 text-red-700 hover:bg-red-100">✕</button>
+        </div>
       </div>}
       {generationNotice && !generationError && <div role="status" className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">{generationNotice}</div>}
 
@@ -291,7 +309,7 @@ export default function PPTInterface() {
       )}
 
       <div className="flex-1 flex gap-4 min-h-[32rem]">
-        <div className="w-64 rounded-xl border border-slate-200 bg-white flex flex-col overflow-hidden flex-shrink-0">
+        <div className="w-64 rounded-xl border border-slate-200 bg-white flex flex-col overflow-hidden flex-shrink-0 shadow-sm">
           <div className="p-3 border-b border-slate-200 flex items-center justify-between">
             <span className="text-xs font-black uppercase tracking-wider text-slate-500">
               Slide Outline ({slides.length})
@@ -387,10 +405,26 @@ export default function PPTInterface() {
         </div>
 
         <div className="flex-1 flex flex-col gap-4 min-w-0">
-          <div className="flex-1 rounded-xl bg-gradient-to-br from-slate-800 via-slate-900 to-black p-3 sm:p-6 overflow-hidden flex items-center justify-center min-h-[16rem] [container-type:size]">
+          <div className="flex-1 rounded-2xl bg-gradient-to-br from-indigo-950 via-slate-900 to-slate-950 p-3 sm:p-6 overflow-hidden flex items-center justify-center min-h-[16rem] shadow-lg [container-type:size]">
             <div className="w-full max-w-4xl aspect-video bg-white rounded-2xl shadow-2xl overflow-hidden flex flex-col min-h-0">
               <div className={`h-2 bg-gradient-to-r ${slide.gradient} flex-shrink-0`} />
               <div className="flex-1 min-h-0 overflow-auto bg-slate-50 p-4 sm:p-6">
+                {slide.type === "empty" && (
+                  <div className="flex h-full min-h-[15rem] flex-col items-center justify-center text-center">
+                    <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-to-br from-indigo-500 to-fuchsia-500 text-3xl text-white shadow-lg shadow-indigo-200">✦</div>
+                    <p className="text-xs font-black uppercase tracking-[0.18em] text-primary-600">Presentation studio</p>
+                    <h2 className="mt-2 max-w-xl text-2xl font-black leading-tight text-slate-900 sm:text-3xl">Build a clear story from your research</h2>
+                    <p className="mt-2 max-w-lg text-sm leading-relaxed text-slate-500">Choose a source and audience above. ScholarMind will shape it into an editable, cited slide outline.</p>
+                    <div className="mt-6 grid w-full max-w-xl grid-cols-1 gap-2 sm:grid-cols-3">
+                      {[["paper", "▤", "Research paper"], ["notes", "✎", "My notes"], ["topic", "◎", "A topic"]].map(([type, icon, label]) => (
+                        <button key={type} type="button" onClick={() => chooseSource(type)} className={`rounded-xl border px-3 py-3 text-left transition hover:-translate-y-0.5 hover:shadow-md ${inputType === type ? "border-primary-300 bg-primary-50 ring-1 ring-primary-200" : "border-slate-200 bg-white hover:border-primary-200"}`}>
+                          <span className="mr-2 text-primary-600">{icon}</span><span className="text-xs font-bold text-slate-700">{label}</span>
+                        </button>
+                      ))}
+                    </div>
+                    <button type="button" onClick={() => document.getElementById("ppt-source")?.scrollIntoView({ behavior: "smooth", block: "center" })} className="mt-5 rounded-lg bg-primary-600 px-4 py-2 text-sm font-bold text-white shadow-md transition hover:bg-primary-700">Set up your deck <span aria-hidden="true">↓</span></button>
+                  </div>
+                )}
                 {slide.type === "title" && (
                   <div className="h-full flex flex-col justify-between">
                     <div className="flex items-start justify-between">
@@ -680,7 +714,7 @@ export default function PPTInterface() {
                   </svg>
                   Generate PPT
                 </button>
-                <button onClick={() => setEditingId((id) => id === slide.id ? null : slide.id)} className="shrink-0 whitespace-nowrap px-4 sm:px-5 py-2.5 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 text-white text-sm font-black shadow-lg shadow-purple-500/25 hover:shadow-xl hover:shadow-purple-500/35 transition flex items-center gap-2">
+                <button disabled={slide.type === "empty"} onClick={() => setEditingId((id) => id === slide.id ? null : slide.id)} className="shrink-0 whitespace-nowrap px-4 sm:px-5 py-2.5 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 text-white text-sm font-black shadow-lg shadow-purple-500/25 hover:shadow-xl hover:shadow-purple-500/35 transition flex items-center gap-2 disabled:cursor-not-allowed disabled:opacity-50">
                   ✏️ {editingId === slide.id ? "Done Editing" : "Edit Slide"}
                 </button>
                 <button
