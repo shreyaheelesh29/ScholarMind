@@ -96,6 +96,38 @@ def _presentation_context(hits: list[dict[str, Any]], max_chars: int = 120_000) 
     return "\n\n".join(passages)
 
 
+def _spread_hits(hits: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    """Pick passages across a document instead of overloading local models with its first pages."""
+    if len(hits) <= limit:
+        return hits
+    if limit <= 1:
+        return hits[:1]
+    indexes = {round(i * (len(hits) - 1) / (limit - 1)) for i in range(limit)}
+    return [hits[i] for i in sorted(indexes)]
+
+
+def _presentation_source_fallback(hits: list[dict[str, Any]], count: int, notice: str) -> dict[str, Any]:
+    """Build a small, explicitly labeled source-only deck when structured AI output fails."""
+    slides = []
+    for hit in hits:
+        source = re.sub(r"\s+", " ", str(hit.get("content", ""))).strip()
+        if not source:
+            continue
+        bullets = [part.strip(" •-\t") for part in re.split(r"(?<=[.!?])\s+|\s*[;|]\s*", source) if part.strip(" •-\t")]
+        if not bullets:
+            bullets = [source]
+        title = re.sub(r"\s+", " ", str(hit.get("section") or "Source material")).strip()
+        slides.append({
+            "title": title[:120] or "Source material",
+            "content": [bullet[:280] for bullet in bullets[:4]],
+            "page": hit.get("page_number"),
+            "speaker_notes": "Source excerpt from the provided material; review and adapt for your audience.",
+        })
+        if len(slides) >= max(1, min(count, 12)):
+            break
+    return {"slides": slides, "_generation_mode": "source_fallback", "_generation_notice": notice}
+
+
 def _analysis_context(hits: list[dict[str, Any]], max_chars: int = 1800) -> str:
     """Give analysis models short passage IDs; the backend resolves citations."""
     return "\n\n".join(
@@ -307,6 +339,11 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
     else:
         raise ValueError("Unsupported study artifact type")
 
+    if kind == "ppt_outline":
+        fallback_data = _presentation_source_fallback(
+            hits, count, "The model did not return usable slides, so this draft uses excerpts from your source."
+        )
+
     api_key, base_url, local_ollama, model = _provider_settings()
     if not api_key and not local_ollama:
         fallback_data["_generation_mode"] = "source_fallback"
@@ -316,12 +353,14 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
     compact_study_kind = kind in {"flashcards", "mindmap", "quiz"}
     generation_count = (
         min(count, 20) if kind in {"quiz", "flashcards"} else
+        min(count, 6) if local_ollama and kind == "ppt_outline" else
         min(count, 12) if kind == "ppt_outline" else
         min(count, 3) if local_ollama and compact_study_kind else min(count, 10)
     )
     source_hits = (hits[:min(10, max(5, generation_count))] if local_ollama and kind == "quiz" else
                    hits[:6] if local_ollama and kind == "mindmap" else
                    hits[:min(8, max(3, generation_count))] if local_ollama and kind == "flashcards" else
+                   _spread_hits(hits, 8) if local_ollama and kind == "ppt_outline" else
                    hits[:3] if local_ollama and compact_study_kind else hits)
     if kind == "mindmap":
         shared = (f"Use only the supplied paper passages. Focus requested: {prompt}. "
@@ -411,6 +450,10 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
         # items keep normal study-tool requests within a practical wait time.
         generation_tokens.update({"flashcards": min(5000, max(700, generation_count * 190)), "mindmap": 450,
                                   "quiz": min(5000, max(900, generation_count * 260))})
+        if kind == "ppt_outline":
+            # Ollama's context window includes both prompt and completion; keep
+            # the structured deck small enough for Qwen to finish its JSON.
+            generation_tokens["ppt_outline"] = min(1200, max(700, generation_count * 150))
     context_chars = (({"simple": 300, "medium": 400, "hard": 500}.get(difficulty, 400)
                       if kind == "quiz" else 750 if kind == "mindmap" else 500)
                      if local_ollama else 1300) if kind in {"flashcards", "mindmap", "quiz", "visualization", "viva"} else 1800
@@ -423,7 +466,7 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
     )
     messages = [
             {"role": "system", "content": system_instruction},
-            {"role": "user", "content": f"{instruction}\n\nSOURCES:\n{_analysis_context(source_hits) if kind in analysis_kinds else _presentation_context(source_hits) if kind == 'ppt_outline' else _context(source_hits, max_chars=context_chars)}"}
+            {"role": "user", "content": f"{instruction}\n\nSOURCES:\n{_analysis_context(source_hits) if kind in analysis_kinds else _presentation_context(source_hits, max_chars=3000 if local_ollama else 120_000) if kind == 'ppt_outline' else _context(source_hits, max_chars=context_chars)}"}
         ]
     if local_ollama and kind in {"quiz", "flashcards"} and generation_count > 2:
         # Small local models can stall on a long structured response. Generate

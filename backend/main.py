@@ -834,7 +834,7 @@ def generate_learning(payload: GenerateRequest, user: dict[str, Any] = Depends(c
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    if content.get("_generation_mode") == "source_fallback":
+    if content.get("_generation_mode") == "source_fallback" and payload.kind != "ppt_outline":
         raise HTTPException(status_code=503, detail=content.get("_generation_notice", "AI generation failed. Please try again."))
     kind_title = payload.kind.replace("_", " ").title()
     artifact_title = (f"{kind_title}: {focus}" if focus else f"{kind_title} from {paper_names}")[:200]

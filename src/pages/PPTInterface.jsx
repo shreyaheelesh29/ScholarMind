@@ -30,6 +30,7 @@ export default function PPTInterface() {
   const [customInstructions, setCustomInstructions] = useState("");
   const [slideCount, setSlideCount] = useState(8);
   const [generationError, setGenerationError] = useState("");
+  const [generationNotice, setGenerationNotice] = useState("");
   const [authExpired, setAuthExpired] = useState(false);
   const [pptArtifact, setPptArtifact] = useState(null);
   const [current, setCurrent] = useState(0);
@@ -98,6 +99,7 @@ export default function PPTInterface() {
     setGenerationProgress(15);
     setAuthExpired(false);
     setGenerationError("");
+    setGenerationNotice("");
     try {
       const result = await apiFetch("/learning/generate", {
         method: "POST",
@@ -114,6 +116,7 @@ export default function PPTInterface() {
       });
       const content = result.artifact.payload || {};
       setPptArtifact(result.artifact);
+      setGenerationNotice(content._generation_notice || "");
       const generated = (content.slides || []).map((item, i) => ({
         id: i + 1, type: "generated", label: item.title || `Slide ${i + 1}`, title: item.title || `Slide ${i + 1}`,
         bullets: Array.isArray(item.content) ? item.content : String(item.content || "").split(/(?<=[.!?])\s+/).filter(Boolean),
@@ -259,6 +262,7 @@ export default function PPTInterface() {
         <span>{generationError}</span>
         {authExpired && <button type="button" onClick={() => { clearSession(); navigate("/login", { state: { from: "/ppt" } }); }} className="shrink-0 rounded-lg bg-red-700 px-4 py-2 font-bold text-white transition hover:bg-red-800">Sign in again</button>}
       </div>}
+      {generationNotice && !generationError && <div role="status" className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">{generationNotice}</div>}
 
       {generating && (
         <div className="rounded-xl border border-primary-200 bg-gradient-to-r from-primary-50 via-white to-accent-50 p-4">
