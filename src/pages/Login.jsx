@@ -1,9 +1,13 @@
 import { useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import { apiFetch, saveSession } from "../api";
 
 export default function Login() {
   const navigate = useNavigate();
+  const location = useLocation();
+  const destination = typeof location.state?.from === "string" && location.state.from.startsWith("/") && !location.state.from.startsWith("//")
+    ? location.state.from
+    : "/dashboard";
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -29,7 +33,7 @@ export default function Login() {
       body: JSON.stringify({ email, password }),
     }).then((result) => {
       saveSession(result);
-      navigate("/dashboard");
+      navigate(destination, { replace: true });
     }).catch((err) => setError(err.message)).finally(() => setLoading(false));
   };
 

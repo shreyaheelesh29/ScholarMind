@@ -1,123 +1,21 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { apiFetch } from "../api";
+import { apiFetch, clearSession } from "../api";
 
 const initialSlides = [
   {
     id: 1,
-    type: "title",
-    label: "Title slide",
-    icon: "🏷",
-    title: "FlashAttention-3",
-    subtitle: "Fused Attention with State-Space Backbone for Long Context",
-    meta: "Research Proposal • ScholarMind PPT Generator",
-    authors: "Presented by: John Doe",
-    date: "August 2024",
-    gradient: "from-indigo-500 via-purple-500 to-pink-500",
-  },
-  {
-    id: 2,
-    type: "intro",
-    label: "Introduction",
-    icon: "👋",
-    title: "Introduction & Research Context",
+    type: "generated",
+    label: "Presentation preview",
+    icon: "✨",
+    title: "Your slides will appear here",
     bullets: [
-      "Transformer models have revolutionized NLP and beyond",
-      "Self-attention scales quadratically — a critical bottleneck",
-      "Long documents (128K+ tokens) increasingly important",
-      "Goal: match full-attention quality at O(n) cost",
+      "Choose a research paper, paste your notes, or enter a topic.",
+      "Select the presentation purpose and slide count.",
+      "Generate your deck when you are ready.",
     ],
-    gradient: "from-blue-500 via-indigo-500 to-purple-500",
-  },
-  {
-    id: 3,
-    type: "background",
-    label: "Background",
-    icon: "📚",
-    title: "Background & Related Work",
-    columns: [
-      { header: "Efficient Attention", items: ["FlashAttention-2 (Dao 2023)", "Longformer (Beltagy 2020)", "BigBird (Zaheer 2020)"] },
-      { header: "State-Space Models", items: ["Mamba (Gu 2023)", "S4 (Gu 2022)", "Hyena (Poli 2023)"] },
-      { header: "Hybrid Methods", items: ["Jamba (AI21 2024)", "RecurrentGemma (DeepMind 2024)"] },
-    ],
-    gap: "No method fuses IO-aware sparse kernels with learnable SSM routing at train-time.",
-    gradient: "from-purple-500 via-fuchsia-500 to-pink-500",
-  },
-  {
-    id: 4,
-    type: "methodology",
-    label: "Methodology",
-    icon: "🔬",
-    title: "Proposed Methodology",
-    steps: [
-      { num: "1", title: "FlashAttention Kernel", desc: "Block-sparse forward/backward with recompute" },
-      { num: "2", title: "Parallel SSM Stream", desc: "Small Mamba layer → global routing weights" },
-      { num: "3", title: "Gated Fusion", desc: "Gate mixes attention and SSM streams" },
-      { num: "4", title: "Fine-tuning", desc: "LongBench, SCROLLS, PubMed QA" },
-    ],
-    gradient: "from-pink-500 via-rose-500 to-red-500",
-  },
-  {
-    id: 5,
-    type: "results",
-    label: "Results",
-    icon: "📊",
-    title: "Experimental Results",
-    table: {
-      headers: ["Method", "FLOPs/n", "LongBench F1", "PubMed EM", "Cost"],
-      rows: [
-        ["FlashAttn-2 (full)", "O(n²)", "76.2", "54.1", "$$$"],
-        ["Longformer", "O(n)", "65.4", "42.8", "$"],
-        ["Mamba", "O(n)", "68.0", "44.5", "$"],
-        ["Ours (target)", "O(n)", "74.0+", "51.0+", "$"],
-      ],
-    },
-    claim: "Near-full-attention quality at SSM cost — Pareto frontier shift.",
-    gradient: "from-orange-500 via-amber-500 to-yellow-500",
-  },
-  {
-    id: 6,
-    type: "discussion",
-    label: "Discussion",
-    icon: "💬",
-    title: "Discussion & Limitations",
-    bullets: [
-      "CUDA kernel engineering effort non-trivial — Triton reference provided",
-      "SSM dimension tradeoff: 128-512 width sweet spot",
-      "Best on: long QA, summarization. Neutral on: short text tasks",
-      "Future work: multi-modal (image + text) fusion at scale",
-    ],
-    takeaway: "Practical architecture for labs without infinite compute.",
-    gradient: "from-teal-500 via-emerald-500 to-green-500",
-  },
-  {
-    id: 7,
-    type: "conclusion",
-    label: "Conclusion",
-    icon: "🎯",
-    title: "Conclusion & Contributions",
-    contributions: [
-      "Novel fused attention + SSM dual-stream architecture",
-      "Reproducible CUDA kernels; open-source training code",
-      "New leaderboard across 14 long-context tasks",
-      "Ablation study of fusion strategies and dimensions",
-    ],
-    gradient: "from-cyan-500 via-blue-500 to-indigo-500",
-  },
-  {
-    id: 8,
-    type: "references",
-    label: "References",
-    icon: "📖",
-    title: "References",
-    references: [
-      "[1] Dao et al. — FlashAttention: Fast & Memory-Efficient Exact Attention, NeurIPS 2022",
-      "[2] Beltagy et al. — Longformer: The Long-Document Transformer, ACL 2020",
-      "[3] Gu et al. — Mamba: Linear-Time Sequence Modeling with Selective State Spaces, 2023",
-      "[4] Zaheer et al. — Big Bird: Transformers for Longer Sequences, NeurIPS 2020",
-      "[5] Poli et al. — Hyena Hierarchy: Towards Larger Convolutional Language Models, ICML 2023",
-    ],
-    gradient: "from-slate-500 via-slate-600 to-slate-800",
+    speakerNotes: "",
+    gradient: "from-indigo-500 to-purple-500",
   },
 ];
 
@@ -126,32 +24,94 @@ export default function PPTInterface() {
   const [slides, setSlides] = useState(initialSlides);
   const [availablePapers, setAvailablePapers] = useState([]);
   const [selectedPaperId, setSelectedPaperId] = useState("");
+  const [inputType, setInputType] = useState("paper");
+  const [sourceText, setSourceText] = useState("");
+  const [presentationPurpose, setPresentationPurpose] = useState("research");
+  const [customInstructions, setCustomInstructions] = useState("");
+  const [slideCount, setSlideCount] = useState(8);
   const [generationError, setGenerationError] = useState("");
+  const [authExpired, setAuthExpired] = useState(false);
   const [pptArtifact, setPptArtifact] = useState(null);
   const [current, setCurrent] = useState(0);
   const [generating, setGenerating] = useState(false);
   const [generationProgress, setGenerationProgress] = useState(0);
+  const [exporting, setExporting] = useState(false);
   const [draggedIndex, setDraggedIndex] = useState(null);
   const [editingId, setEditingId] = useState(null);
 
   const slide = slides[current];
 
+  const reportError = (err) => {
+    if (err.status === 401) {
+      setAuthExpired(true);
+      setGenerationError("Your session has expired. Sign in again to continue.");
+      return;
+    }
+    setGenerationError(err.message);
+  };
+
+  const persistSlideEdits = (nextSlides) => {
+    if (!pptArtifact?.id) return;
+    const payload = {
+      ...(pptArtifact.payload || {}),
+      slides: nextSlides.map((item) => ({
+        title: item.title,
+        content: item.bullets || [],
+        speaker_notes: item.speakerNotes || "",
+        page: Number.isInteger(item.page) ? item.page : null,
+      })),
+    };
+    setPptArtifact((item) => ({ ...item, payload }));
+    apiFetch(`/artifacts/${pptArtifact.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ payload }),
+    }).catch((err) => reportError(err.status === 401 ? err : new Error(`Could not save slide changes: ${err.message}`)));
+  };
+
+  const addSlide = () => {
+    const newSlide = {
+      id: Date.now(), type: "generated", label: "New slide", title: "New slide",
+      bullets: ["Add a key point from your source."], speakerNotes: "", page: null,
+      icon: "✨", gradient: "from-indigo-500 to-purple-500",
+    };
+    const nextSlides = [...slides, newSlide];
+    setSlides(nextSlides);
+    setCurrent(nextSlides.length - 1);
+    setEditingId(newSlide.id);
+    persistSlideEdits(nextSlides);
+  };
+
   useEffect(() => {
     apiFetch("/papers").then(({ papers }) => {
       setAvailablePapers(papers);
       if (papers.length) setSelectedPaperId(papers[0].id);
-    }).catch((err) => setGenerationError(err.message));
+    }).catch(reportError);
   }, []);
 
   const go = (dir) => setCurrent((i) => Math.max(0, Math.min(slides.length - 1, i + dir)));
 
   const handleGenerate = async () => {
-    if (!selectedPaperId) { setGenerationError("Upload a paper first, then select it above."); return; }
+    if (inputType === "paper" && !selectedPaperId) { setGenerationError("Upload a paper first, then select it above."); return; }
+    if (inputType !== "paper" && !sourceText.trim()) { setGenerationError(inputType === "topic" ? "Enter a topic for your presentation." : "Paste your notes to build the presentation."); return; }
     setGenerating(true);
     setGenerationProgress(15);
+    setAuthExpired(false);
     setGenerationError("");
     try {
-      const result = await apiFetch("/learning/generate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind: "ppt_outline", paper_id: selectedPaperId, count: 8 }) });
+      const result = await apiFetch("/learning/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          kind: "ppt_outline",
+          paper_id: inputType === "paper" ? selectedPaperId : null,
+          presentation_input_type: inputType,
+          source_text: inputType === "paper" ? "" : sourceText.trim(),
+          presentation_purpose: presentationPurpose,
+          prompt: customInstructions.trim(),
+          count: slideCount,
+        }),
+      });
       const content = result.artifact.payload || {};
       setPptArtifact(result.artifact);
       const generated = (content.slides || []).map((item, i) => ({
@@ -161,7 +121,7 @@ export default function PPTInterface() {
       }));
       if (!generated.length) throw new Error("The service returned no slides. Try again with a different paper.");
       setSlides(generated); setCurrent(0); setGenerationProgress(100);
-    } catch (err) { setGenerationError(err.message); }
+    } catch (err) { reportError(err); }
     finally { setGenerating(false); }
   };
 
@@ -170,7 +130,55 @@ export default function PPTInterface() {
     const previous = pptArtifact.payload || {};
     const payload = { ...previous, slides: (previous.slides || []).map((item, i) => i === current ? { ...item, speaker_notes: notes } : item) };
     setPptArtifact((item) => ({ ...item, payload }));
-    apiFetch(`/artifacts/${pptArtifact.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ payload }) }).catch((err) => setGenerationError(`Could not save presenter notes: ${err.message}`));
+    apiFetch(`/artifacts/${pptArtifact.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ payload }) }).catch((err) => reportError(err.status === 401 ? err : new Error(`Could not save presenter notes: ${err.message}`)));
+  };
+
+  const handleDownload = async () => {
+    if (!slides.length) return;
+    setExporting(true);
+    setGenerationError("");
+    try {
+      const response = await fetch("/api/presentations/export", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${localStorage.getItem("scholarmind_token") || ""}`,
+        },
+        body: JSON.stringify({
+          title: pptArtifact?.title || "ScholarMind Presentation",
+          source_label: inputType === "paper"
+            ? availablePapers.find((paper) => paper.id === selectedPaperId)?.filename || "Uploaded source"
+            : inputType === "notes" ? "User-provided notes" : "User-provided topic",
+          slides: slides.map((item) => ({
+            title: item.title || item.label || "Untitled slide",
+            content: item.bullets || [],
+            speaker_notes: item.speakerNotes || "",
+            page: Number.isInteger(item.page) ? item.page : null,
+          })),
+        }),
+      });
+      if (!response.ok) {
+        const result = await response.json().catch(() => ({}));
+        const error = new Error(result.detail || `Could not create PowerPoint (${response.status})`);
+        error.status = response.status;
+        throw error;
+      }
+      const file = await response.blob();
+      const disposition = response.headers.get("content-disposition") || "";
+      const filename = disposition.match(/filename="?([^";]+)"?/i)?.[1] || "scholarmind-presentation.pptx";
+      const url = URL.createObjectURL(file);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = filename;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      reportError(err);
+    } finally {
+      setExporting(false);
+    }
   };
 
   const handleDragStart = (e, index) => {
@@ -193,39 +201,64 @@ export default function PPTInterface() {
 
   const handleDrop = () => {
     setDraggedIndex(null);
+    persistSlideEdits(slides);
   };
 
   const deleteSlide = (index) => {
     if (slides.length <= 1) return;
     const newSlides = slides.filter((_, i) => i !== index);
     setSlides(newSlides);
+    persistSlideEdits(newSlides);
     if (index === current) setCurrent(Math.max(0, current - 1));
     else if (index < current) setCurrent(current - 1);
   };
 
   return (
-    <div className="h-[calc(100vh-7rem)] flex flex-col gap-4 animate-fade-in">
+    <div className="min-h-[calc(100vh-7rem)] flex flex-col gap-4 animate-fade-in">
       <div className="flex items-start justify-between gap-4 flex-wrap">
         <div>
           <p className="text-sm font-medium text-primary-600">Output & Learning</p>
           <h1 className="mt-1 text-3xl font-bold text-slate-900">PPT Generator</h1>
-          <p className="mt-2 text-slate-500">Turn your research into a ready-to-present slide deck with citations.</p>
+          <p className="mt-2 text-slate-500">Create a presentation from a paper, your notes, or a topic.</p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
-          <div className="relative">
-            <select value={selectedPaperId} onChange={(e) => setSelectedPaperId(e.target.value)} className="appearance-none pl-10 pr-10 py-2.5 rounded-lg border border-slate-200 bg-white text-sm outline-none focus:border-primary-300 focus:ring-2 focus:ring-primary-500/20">
-              {availablePapers.length ? availablePapers.map((paper) => <option key={paper.id} value={paper.id}>📄 {paper.filename}</option>) : <option value="">No uploaded papers</option>}
-            </select>
-            <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-              <svg className="w-4 h-4 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-              </svg>
-            </div>
-          </div>
+          <select aria-label="Presentation source" value={inputType} onChange={(e) => setInputType(e.target.value)} className="px-3 py-2.5 rounded-lg border border-slate-200 bg-white text-sm outline-none focus:border-primary-300 focus:ring-2 focus:ring-primary-500/20">
+            <option value="paper">From a research paper</option>
+            <option value="notes">From my notes</option>
+            <option value="topic">From a topic</option>
+          </select>
+          {inputType === "paper" && <select aria-label="Research paper" value={selectedPaperId} onChange={(e) => setSelectedPaperId(e.target.value)} className="max-w-56 px-3 py-2.5 rounded-lg border border-slate-200 bg-white text-sm outline-none focus:border-primary-300 focus:ring-2 focus:ring-primary-500/20">
+            {availablePapers.length ? availablePapers.map((paper) => <option key={paper.id} value={paper.id}>{paper.filename}</option>) : <option value="">No uploaded papers</option>}
+          </select>}
+          <select aria-label="Presentation purpose" value={presentationPurpose} onChange={(e) => setPresentationPurpose(e.target.value)} className="px-3 py-2.5 rounded-lg border border-slate-200 bg-white text-sm outline-none focus:border-primary-300 focus:ring-2 focus:ring-primary-500/20">
+            <option value="research">Research overview</option>
+            <option value="lecture">Class lecture</option>
+            <option value="thesis_defense">Thesis defense</option>
+            <option value="conference">Conference talk</option>
+            <option value="project_pitch">Project pitch</option>
+          </select>
+          <select aria-label="Number of slides" value={slideCount} onChange={(e) => setSlideCount(Number(e.target.value))} className="px-3 py-2.5 rounded-lg border border-slate-200 bg-white text-sm outline-none focus:border-primary-300 focus:ring-2 focus:ring-primary-500/20">
+            {[5, 8, 10, 12].map((count) => <option key={count} value={count}>{count} slides</option>)}
+          </select>
         </div>
       </div>
 
-      {generationError && <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700">{generationError}</p>}
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+        {inputType !== "paper" && <label className="block text-xs font-bold uppercase tracking-wide text-slate-500">
+          {inputType === "topic" ? "Topic and source details" : "Paste your notes"}
+          <textarea value={sourceText} onChange={(e) => setSourceText(e.target.value.slice(0, 15000))} rows={2} maxLength={15000} placeholder={inputType === "topic" ? "Enter the topic and the facts or details to include. Slides will use only what you provide here." : "Paste the notes or source material you want the slides to cover…"} className="mt-1 w-full rounded-lg border border-slate-200 bg-white p-3 text-sm font-normal normal-case tracking-normal text-slate-800 outline-none focus:ring-2 focus:ring-primary-200" />
+          <span className="mt-1 block text-[11px] font-normal normal-case tracking-normal">Source-only generation · {sourceText.length.toLocaleString()} / 15,000 characters. Upload longer material as a document.</span>
+        </label>}
+        <label className="block text-xs font-bold uppercase tracking-wide text-slate-500">
+          Custom instructions <span className="font-normal normal-case tracking-normal">(optional)</span>
+          <textarea value={customInstructions} onChange={(e) => setCustomInstructions(e.target.value.slice(0, 1000))} rows={2} maxLength={1000} placeholder="e.g. Focus on practical applications and use language suitable for first-year students" className="mt-1 w-full rounded-lg border border-slate-200 bg-white p-3 text-sm font-normal normal-case tracking-normal text-slate-800 outline-none focus:ring-2 focus:ring-primary-200" />
+        </label>
+      </div>
+
+      {generationError && <div role="alert" className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+        <span>{generationError}</span>
+        {authExpired && <button type="button" onClick={() => { clearSession(); navigate("/login", { state: { from: "/ppt" } }); }} className="shrink-0 rounded-lg bg-red-700 px-4 py-2 font-bold text-white transition hover:bg-red-800">Sign in again</button>}
+      </div>}
 
       {generating && (
         <div className="rounded-xl border border-primary-200 bg-gradient-to-r from-primary-50 via-white to-accent-50 p-4">
@@ -236,7 +269,7 @@ export default function PPTInterface() {
                 <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
               </svg>
               <span className="text-sm font-black text-slate-800">
-                {generationProgress < 30 && "🔍 Analyzing paper content & structure..."}
+                {generationProgress < 30 && (inputType === "paper" ? "🔍 Analyzing paper content & structure..." : "🔍 Analyzing your input...")}
                 {generationProgress >= 30 && generationProgress < 60 && "📝 Drafting slide outlines & bullets..."}
                 {generationProgress >= 60 && generationProgress < 90 && "🎨 Applying layout templates & styling..."}
                 {generationProgress >= 90 && "✅ Finalizing presentation & citations..."}
@@ -253,13 +286,13 @@ export default function PPTInterface() {
         </div>
       )}
 
-      <div className="flex-1 flex gap-4 min-h-0">
+      <div className="flex-1 flex gap-4 min-h-[32rem]">
         <div className="w-64 rounded-xl border border-slate-200 bg-white flex flex-col overflow-hidden flex-shrink-0">
           <div className="p-3 border-b border-slate-200 flex items-center justify-between">
             <span className="text-xs font-black uppercase tracking-wider text-slate-500">
               Slide Outline ({slides.length})
             </span>
-            <button className="p-1.5 rounded-md hover:bg-slate-100 text-slate-500" title="Add slide">
+            <button onClick={addSlide} className="p-1.5 rounded-md hover:bg-slate-100 text-slate-500" title="Add slide">
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
               </svg>
@@ -301,8 +334,15 @@ export default function PPTInterface() {
                       <input
                         autoFocus
                         defaultValue={s.label}
-                        onBlur={() => setEditingId(null)}
+                        onBlur={(e) => {
+                          const title = e.target.value.trim() || `Slide ${i + 1}`;
+                          const nextSlides = slides.map((item, slideIndex) => slideIndex === i ? { ...item, title, label: title } : item);
+                          setSlides(nextSlides);
+                          persistSlideEdits(nextSlides);
+                          setEditingId(null);
+                        }}
                         onKeyDown={(e) => e.key === "Enter" && setEditingId(null)}
+                        onChange={(e) => setSlides((existing) => existing.map((item, slideIndex) => slideIndex === i ? { ...item, title: e.target.value, label: e.target.value } : item))}
                         className="w-full px-2 py-1 text-xs rounded border border-primary-300 focus:ring-1 focus:ring-primary-500 outline-none bg-white"
                       />
                     ) : (
@@ -343,10 +383,10 @@ export default function PPTInterface() {
         </div>
 
         <div className="flex-1 flex flex-col gap-4 min-w-0">
-          <div className="flex-1 rounded-xl bg-gradient-to-br from-slate-800 via-slate-900 to-black p-6 overflow-auto flex items-center justify-center min-h-0">
-            <div className="w-full max-w-4xl aspect-video bg-white rounded-2xl shadow-2xl overflow-hidden flex flex-col">
+          <div className="flex-1 rounded-xl bg-gradient-to-br from-slate-800 via-slate-900 to-black p-3 sm:p-6 overflow-hidden flex items-center justify-center min-h-[16rem] [container-type:size]">
+            <div className="w-full max-w-4xl aspect-video bg-white rounded-2xl shadow-2xl overflow-hidden flex flex-col min-h-0">
               <div className={`h-2 bg-gradient-to-r ${slide.gradient} flex-shrink-0`} />
-              <div className={`flex-1 p-8 overflow-auto bg-gradient-to-br ${slide.gradient} bg-opacity-[0.03]`}>
+              <div className="flex-1 min-h-0 overflow-auto bg-slate-50 p-4 sm:p-6">
                 {slide.type === "title" && (
                   <div className="h-full flex flex-col justify-between">
                     <div className="flex items-start justify-between">
@@ -354,10 +394,10 @@ export default function PPTInterface() {
                         <span className="px-3 py-1 rounded-full bg-white/90 backdrop-blur-sm text-primary-700 text-xs font-black uppercase shadow-md">
                           Research Proposal
                         </span>
-                        <h2 className="mt-6 text-4xl font-black text-slate-900 leading-tight max-w-[80%]">
+                        <h2 className="mt-4 sm:mt-6 text-2xl sm:text-3xl lg:text-4xl font-black text-slate-900 leading-tight max-w-[80%] break-words">
                           {slide.title}
                         </h2>
-                        <p className="mt-4 text-xl text-slate-600 max-w-[85%]">{slide.subtitle}</p>
+                        <p className="mt-3 text-base sm:text-lg text-slate-600 max-w-[85%] break-words">{slide.subtitle}</p>
                       </div>
                       <div className={`w-20 h-20 rounded-2xl bg-gradient-to-br ${slide.gradient} flex items-center justify-center shadow-2xl`}>
                         <svg className="w-10 h-10 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -555,9 +595,21 @@ export default function PPTInterface() {
 
                 {slide.type === "generated" && (
                   <div className="flex h-full flex-col">
-                    <div className="mb-4 border-b-2 border-slate-100 pb-3"><span className="text-xs font-black uppercase tracking-wider text-primary-600">Source page {slide.page || "citations available"}</span><h2 className="mt-1 text-3xl font-black text-slate-900">{slide.title}</h2></div>
-                    <ul className="flex-1 space-y-3 overflow-auto">{slide.bullets.map((bullet, i) => <li key={i} className="rounded-xl border border-slate-100 bg-white/80 p-3 text-base font-medium text-slate-800">{bullet}</li>)}</ul>
-                    <label className="mt-3 block text-xs font-black uppercase tracking-wider text-primary-700">Presenter notes<textarea value={slide.speakerNotes} onChange={(e) => setSlides((existing) => existing.map((item, i) => i === current ? { ...item, speakerNotes: e.target.value } : item))} onBlur={(e) => savePresenterNotes(e.target.value)} rows={3} placeholder="Add notes to present with this slide…" className="mt-1 w-full rounded-lg border border-primary-200 bg-white p-3 text-sm font-normal normal-case tracking-normal text-slate-800 outline-none focus:ring-2 focus:ring-primary-200" /></label>
+                    <div className="mb-3 border-b-2 border-slate-100 pb-2 sm:mb-4 sm:pb-3"><span className="text-[10px] sm:text-xs font-black uppercase tracking-wider text-primary-600">{slide.page ? `Source page ${slide.page}` : pptArtifact?.payload?.presentation_input_type === "notes" ? "From your notes • no page citation" : pptArtifact?.payload?.presentation_input_type === "topic" ? "Topic overview • no page citation" : "Presentation preview"}</span><h2 className="mt-1 text-xl sm:text-2xl lg:text-3xl font-black leading-tight text-slate-900 break-words">{slide.title}</h2></div>
+                    {editingId === slide.id ? (
+                      <textarea
+                        aria-label="Edit slide bullet points"
+                        value={slide.bullets.join("\n")}
+                        onChange={(e) => setSlides((existing) => existing.map((item, i) => i === current ? { ...item, bullets: e.target.value.split("\n") } : item))}
+                        onBlur={() => persistSlideEdits(slides)}
+                        rows={6}
+                        className="min-h-0 flex-1 resize-none rounded-xl border border-primary-200 bg-white p-3 text-sm font-medium leading-relaxed text-slate-800 outline-none focus:ring-2 focus:ring-primary-200"
+                        placeholder="One point per line"
+                      />
+                    ) : (
+                      <ul className="flex-1 space-y-2 overflow-auto">{slide.bullets.map((bullet, i) => <li key={i} className="rounded-xl border border-slate-100 bg-white/80 p-2 sm:p-3 text-sm sm:text-base font-medium text-slate-800 break-words">{bullet}</li>)}</ul>
+                    )}
+                    <label className="mt-2 block flex-shrink-0 text-[10px] sm:text-xs font-black uppercase tracking-wider text-primary-700">Presenter notes<textarea value={slide.speakerNotes} onChange={(e) => setSlides((existing) => existing.map((item, i) => i === current ? { ...item, speakerNotes: e.target.value } : item))} onBlur={(e) => savePresenterNotes(e.target.value)} rows={2} placeholder="Add notes to present with this slide…" className="mt-1 w-full rounded-lg border border-primary-200 bg-white p-2 sm:p-3 text-xs sm:text-sm font-normal normal-case tracking-normal text-slate-800 outline-none focus:ring-2 focus:ring-primary-200" /></label>
                   </div>
                 )}
               </div>
@@ -588,7 +640,7 @@ export default function PPTInterface() {
               ))}
             </div>
 
-            <div className="flex items-center gap-3 flex-wrap">
+            <div className="flex items-center justify-between gap-3 flex-wrap">
               <div className="flex items-center gap-1 p-1 rounded-lg bg-slate-100">
                 <button
                   onClick={() => go(-1)}
@@ -613,39 +665,39 @@ export default function PPTInterface() {
                 </button>
               </div>
 
-              <div className="flex-1 flex items-center justify-center gap-2 flex-wrap">
+              <div className="flex flex-1 min-w-[min(100%,24rem)] items-center justify-center gap-2 flex-wrap">
                 <button
                   onClick={handleGenerate}
                   disabled={generating}
-                  className="px-5 py-2.5 rounded-xl bg-gradient-to-br from-primary-600 to-primary-500 text-white text-sm font-black shadow-lg shadow-primary-500/25 hover:shadow-xl hover:shadow-primary-500/35 transition flex items-center gap-2 disabled:opacity-70"
+                  className="shrink-0 whitespace-nowrap px-4 sm:px-5 py-2.5 rounded-xl bg-gradient-to-br from-primary-600 to-primary-500 text-white text-sm font-black shadow-lg shadow-primary-500/25 hover:shadow-xl hover:shadow-primary-500/35 transition flex items-center gap-2 disabled:opacity-70"
                 >
                   <svg className={`w-4 h-4 ${generating ? "animate-spin" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
                   </svg>
                   Generate PPT
                 </button>
-                <button className="px-5 py-2.5 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 text-white text-sm font-black shadow-lg shadow-purple-500/25 hover:shadow-xl hover:shadow-purple-500/35 transition flex items-center gap-2">
-                  🧠 Deep Explain
+                <button onClick={() => setEditingId((id) => id === slide.id ? null : slide.id)} className="shrink-0 whitespace-nowrap px-4 sm:px-5 py-2.5 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 text-white text-sm font-black shadow-lg shadow-purple-500/25 hover:shadow-xl hover:shadow-purple-500/35 transition flex items-center gap-2">
+                  ✏️ {editingId === slide.id ? "Done Editing" : "Edit Slide"}
                 </button>
                 <button
                   onClick={() => navigate("/viewer")}
-                  className="px-5 py-2.5 rounded-xl bg-gradient-to-br from-success-500 to-emerald-600 text-white text-sm font-black shadow-lg shadow-success-500/25 hover:shadow-xl hover:shadow-success-500/35 transition flex items-center gap-2"
+                  className="shrink-0 whitespace-nowrap px-4 sm:px-5 py-2.5 rounded-xl bg-gradient-to-br from-success-500 to-emerald-600 text-white text-sm font-black shadow-lg shadow-success-500/25 hover:shadow-xl hover:shadow-success-500/35 transition flex items-center gap-2"
                 >
                   🔬 Source Evidence
                 </button>
                 <button
                   onClick={() => navigate("/viva")}
-                  className="px-5 py-2.5 rounded-xl bg-gradient-to-br from-accent-500 to-pink-600 text-white text-sm font-black shadow-lg shadow-accent-500/25 hover:shadow-xl hover:shadow-accent-500/35 transition flex items-center gap-2"
+                  className="shrink-0 whitespace-nowrap px-4 sm:px-5 py-2.5 rounded-xl bg-gradient-to-br from-accent-500 to-pink-600 text-white text-sm font-black shadow-lg shadow-accent-500/25 hover:shadow-xl hover:shadow-accent-500/35 transition flex items-center gap-2"
                 >
                   🎤 Viva Me
                 </button>
               </div>
 
-              <button className="px-5 py-2.5 rounded-xl bg-gradient-to-br from-slate-800 to-slate-900 text-white text-sm font-black shadow-lg hover:shadow-xl hover:scale-[1.02] transition flex items-center gap-2">
+              <button onClick={handleDownload} disabled={(!pptArtifact && slides.length <= 1) || exporting} title={!pptArtifact && slides.length <= 1 ? "Generate a presentation or add a slide first" : "Download an editable PowerPoint file"} className="shrink-0 whitespace-nowrap px-4 sm:px-5 py-2.5 rounded-xl bg-gradient-to-br from-slate-800 to-slate-900 text-white text-sm font-black shadow-lg hover:shadow-xl hover:scale-[1.02] transition flex items-center gap-2 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:scale-100">
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
                 </svg>
-                Download PPT
+                {exporting ? "Preparing PowerPoint…" : "Download PPTX"}
               </button>
             </div>
           </div>

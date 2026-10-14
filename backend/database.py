@@ -567,3 +567,19 @@ def hybrid_search(query: str, query_embedding: list[float], paper_ids: list[str]
     with connection() as conn, conn.cursor(row_factory=psycopg.rows.dict_row) as cursor:
         cursor.execute(sql, params)
         return list(cursor.fetchall())
+
+
+def list_paper_chunks(paper_ids: list[str], owner_id: str) -> list[dict[str, Any]]:
+    """Return every indexed source chunk for selected papers, in document order."""
+    if not paper_ids:
+        return []
+    with connection() as conn, conn.cursor(row_factory=psycopg.rows.dict_row) as cursor:
+        cursor.execute(
+            """SELECT p.id::text AS paper_id, p.filename, c.page_number, c.chunk_number,
+                      COALESCE(c.section, 'Document text') AS section, c.content
+               FROM paper_chunks c JOIN papers p ON p.id = c.paper_id
+               WHERE c.paper_id = ANY(%s::uuid[]) AND p.owner_id = %s::uuid
+               ORDER BY p.filename, c.page_number, c.chunk_number""",
+            (paper_ids, owner_id),
+        )
+        return list(cursor.fetchall())

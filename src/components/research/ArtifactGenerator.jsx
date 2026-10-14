@@ -85,7 +85,7 @@ export default function ArtifactGenerator({ kinds, heading = "Generate from your
       if (items.length) {
         const requestedIds = initialPaperIds.filter((paperId) => items.some((item) => item.id === paperId)).slice(0, maxPapers);
         setPaperIds(multiPaper
-          ? requestedIds.length ? requestedIds : items.slice(0, maxPapers).map((item) => item.id)
+          ? requestedIds.length ? requestedIds : items.slice(0, Math.min(maxPapers, 2)).map((item) => item.id)
           : [items.find((item) => item.id === initialPaperId)?.id || items[0].id]);
       }
     }).catch((err) => setError(err.message))
