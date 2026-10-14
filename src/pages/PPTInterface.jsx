@@ -35,6 +35,7 @@ export default function PPTInterface() {
   const [exporting, setExporting] = useState(false);
   const [draggedIndex, setDraggedIndex] = useState(null);
   const [editingId, setEditingId] = useState(null);
+  const [notesExpanded, setNotesExpanded] = useState(true);
 
   const slide = slides[current];
 
@@ -138,6 +139,7 @@ export default function PPTInterface() {
       }));
       if (!generated.length) throw new Error("The service returned no slides. Try again with a different paper.");
       setSlides(generated); setCurrent(0); setGenerationProgress(100);
+      setNotesExpanded(true);
     } catch (err) { reportError(err); }
     finally { setGenerating(false); }
   };
@@ -647,7 +649,6 @@ export default function PPTInterface() {
                     ) : (
                       <ul className="flex-1 space-y-2 overflow-auto">{slide.bullets.map((bullet, i) => <li key={i} className="rounded-xl border border-slate-100 bg-white/80 p-2 sm:p-3 text-sm sm:text-base font-medium text-slate-800 break-words">{bullet}</li>)}</ul>
                     )}
-                    <label className="mt-2 block flex-shrink-0 text-[10px] sm:text-xs font-black uppercase tracking-wider text-primary-700">Presenter notes<textarea value={slide.speakerNotes} onChange={(e) => setSlides((existing) => existing.map((item, i) => i === current ? { ...item, speakerNotes: e.target.value } : item))} onBlur={(e) => savePresenterNotes(e.target.value)} rows={2} placeholder="Add notes to present with this slide…" className="mt-1 w-full rounded-lg border border-primary-200 bg-white p-2 sm:p-3 text-xs sm:text-sm font-normal normal-case tracking-normal text-slate-800 outline-none focus:ring-2 focus:ring-primary-200" /></label>
                   </div>
                 )}
               </div>
@@ -659,6 +660,29 @@ export default function PPTInterface() {
               </div>
             </div>
           </div>
+
+          {slide.type === "generated" && <section className="overflow-hidden rounded-xl border border-indigo-100 bg-white shadow-sm">
+            <div className="flex items-center justify-between gap-3 px-4 py-3">
+              <div className="min-w-0">
+                <h3 className="text-sm font-extrabold text-slate-900">Presenter notes <span className="font-medium text-slate-500">· Slide {current + 1}</span></h3>
+                <p className="mt-0.5 text-xs text-slate-500">Private speaking prompts; these appear in the exported PowerPoint notes.</p>
+              </div>
+              <button type="button" aria-expanded={notesExpanded} onClick={() => setNotesExpanded((expanded) => !expanded)} className="shrink-0 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-bold text-indigo-700 transition hover:border-indigo-200 hover:bg-indigo-50">
+                {notesExpanded ? "Hide notes" : "Show notes"} <span aria-hidden="true">{notesExpanded ? "⌃" : "⌄"}</span>
+              </button>
+            </div>
+            {notesExpanded && <div className="border-t border-indigo-50 px-4 pb-4">
+              <textarea
+                aria-label={`Presenter notes for slide ${current + 1}`}
+                value={slide.speakerNotes || ""}
+                onChange={(event) => setSlides((existing) => existing.map((item, i) => i === current ? { ...item, speakerNotes: event.target.value } : item))}
+                onBlur={(event) => savePresenterNotes(event.target.value)}
+                rows={4}
+                placeholder="Add the explanation, transitions, or reminders you want to see while presenting…"
+                className="mt-3 w-full resize-y rounded-xl border border-slate-200 bg-slate-50 px-3 py-3 text-sm leading-relaxed text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-indigo-300 focus:bg-white focus:ring-4 focus:ring-indigo-100"
+              />
+            </div>}
+          </section>}
 
           <div className="rounded-xl border border-slate-200 bg-white p-3 space-y-3">
             <div className="flex gap-3 overflow-x-auto pb-1">
