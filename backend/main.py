@@ -3,8 +3,11 @@ from __future__ import annotations
 import os
 import re
 import hashlib
+import logging
 import random
 import shutil
+import threading
+import time
 import uuid
 from io import BytesIO
 from functools import lru_cache
@@ -33,15 +36,22 @@ from database import (create_user, find_user_by_email, get_paper, get_user, hybr
                       mark_user_notifications_read, update_user_settings, record_activity, record_login, save_artifact,
                       save_paper_annotation, delete_paper_annotation,
                       save_chat_message, save_chunks, save_paper_if_unique, sync_admin_emails,
-                      find_duplicate_paper, delete_user_collection, list_user_collections,
+                      find_duplicate_paper, delete_user_collection, list_user_collections, neighboring_chunks,
+                      list_paper_chunks, get_paper_semantic_analysis, save_paper_semantic_analysis,
+                      paper_semantic_analysis_lock,
                        save_user_collection, update_user_collection, user_owns_artifacts,
                        update_flashcard_reviews, start_study_session, add_study_session_time,
                        save_quiz_attempt, get_user_artifact, get_dashboard_metrics)
 from rag import (ai_provider_status, answer, citations_for, embed, embed_query,
-                 expand_mindmap_node, generate_study_artifact)
+                 expand_mindmap_node, generate_study_artifact, verify_flashcards,
+                 analyze_document_semantics, plan_flashcard_objectives, generate_planned_flashcards,
+                 _questions_are_equivalent, _validate_study_artifact)
 from document_processor import extract_text
 
 BASE_DIR = Path(__file__).resolve().parent
+logger = logging.getLogger(__name__)
+_semantic_cache_locks: dict[tuple[str, str], threading.Lock] = {}
+_semantic_cache_locks_guard = threading.Lock()
 PAPERS_DIR = Path(os.getenv("PAPER_STORAGE_DIR", str(BASE_DIR / "data" / "papers"))).resolve()
 MAX_UPLOAD_BYTES = 100 * 1024 * 1024
 ALLOWED_EXTENSIONS = {
@@ -637,7 +647,11 @@ def upload_paper(
         # ---------------------------------------------------------
         # 3. Extract text
         # ---------------------------------------------------------
+        extraction_started = time.perf_counter()
         extracted = extract_text(file_path)
+        logger.info("Document extraction completed paper_id=%s type=%s pages=%d duration_seconds=%.2f",
+                    paper_id, extension.lstrip("."), extracted["page_count"],
+                    time.perf_counter() - extraction_started)
 
         full_text = extracted["text"]
         pages = extracted["pages"]
@@ -654,6 +668,7 @@ def upload_paper(
         chunks = []
         next_number = 1
 
+        chunk_started = time.perf_counter()
         for page in pages:
             page_chunks = chunk_text(
                 page["text"],
@@ -669,13 +684,18 @@ def upload_paper(
             raise ValueError(
                 "No text chunks could be created from this file."
             )
+        logger.info("Document chunking completed paper_id=%s chunks=%d duration_seconds=%.2f",
+                    paper_id, len(chunks), time.perf_counter() - chunk_started)
 
         # ---------------------------------------------------------
         # 5. Generate embeddings
         # ---------------------------------------------------------
+        embedding_started = time.perf_counter()
         embeddings = embed(
             [chunk["text"] for chunk in chunks]
         )
+        logger.info("Document embedding completed paper_id=%s chunks=%d duration_seconds=%.2f",
+                    paper_id, len(chunks), time.perf_counter() - embedding_started)
 
         # ---------------------------------------------------------
         # 6. Save paper metadata
@@ -801,6 +821,87 @@ def _mindmap_output_matches_focus(focus: str, nodes: list[dict[str, Any]]) -> bo
     return related_count >= required_related
 
 
+def _semantic_representation_for_paper(paper: dict[str, Any], user: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Load cached document understanding or compute it once per paper version."""
+    paper_id = str(paper["id"])
+    chunks = list_paper_chunks([paper_id], user["id"])
+    if not chunks:
+        raise ValueError(f"No indexed source passages are available for {paper.get('filename', 'this paper')}")
+    content_hash = paper.get("content_sha256") or hashlib.sha256(
+        "\n".join(str(chunk.get("content", "")) for chunk in chunks).encode("utf-8")
+    ).hexdigest()
+    cached = get_paper_semantic_analysis(paper_id, content_hash)
+    if cached:
+        logger.info("Document semantic cache hit paper_id=%s chunks=%d", paper_id, len(chunks))
+        return cached, chunks
+    lock_key = (paper_id, content_hash)
+    with _semantic_cache_locks_guard:
+        lock = _semantic_cache_locks.setdefault(lock_key, threading.Lock())
+    with lock:
+        with paper_semantic_analysis_lock(paper_id, content_hash):
+            cached = get_paper_semantic_analysis(paper_id, content_hash)
+            if cached:
+                logger.info("Document semantic cache hit after wait paper_id=%s", paper_id)
+                return cached, chunks
+            started = time.perf_counter()
+            representation = analyze_document_semantics(chunks)
+            save_paper_semantic_analysis(paper_id, content_hash, representation)
+            logger.info("Document semantic analysis completed paper_id=%s sections=%d concepts=%d duration_seconds=%.2f",
+                        paper_id, len(representation.get("sections", [])), len(representation.get("concepts", [])),
+                        time.perf_counter() - started)
+            return representation, chunks
+
+
+def _verify_flashcard_candidates(cards: list[dict[str, Any]], paper_ids: list[str],
+                                user: dict[str, Any],
+                                seed_evidence_by_id: dict[str, list[dict[str, Any]]] | None = None
+                                ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Verify against both objective-retrieved source evidence and question search."""
+    if not cards:
+        return [], []
+    started = time.perf_counter()
+    evidence_by_id: dict[str, list[dict[str, Any]]] = {}
+    seed_refs: list[dict[str, Any]] = []
+    hits_by_id: dict[str, list[dict[str, Any]]] = {}
+    seed_evidence_by_id = seed_evidence_by_id or {}
+    for card in cards:
+        card_id = str(card.get("id", ""))
+        question = str(card.get("front", "")).strip()
+        if not card_id or not question:
+            hits_by_id[card_id] = []
+            continue
+        question_hits = hybrid_search(question, embed_query(question), paper_ids, 4, owner_id=user["id"])
+        hits_by_id[card_id] = question_hits
+        seed_refs.extend({"paper_id": hit["paper_id"], "chunk_number": hit["chunk_number"]}
+                         for hit in [*seed_evidence_by_id.get(card_id, []), *question_hits[:2]]
+                         if hit.get("paper_id") and type(hit.get("chunk_number")) is int)
+    adjacent = neighboring_chunks(seed_refs, user["id"], radius=1) if seed_refs else []
+    all_evidence: list[dict[str, Any]] = []
+    for card in cards:
+        card_id = str(card.get("id", ""))
+        question_hits = hits_by_id.get(card_id, [])
+        selected = list(seed_evidence_by_id.get(card_id, []))
+        for hit in question_hits[:2]:
+            if all((hit.get("paper_id"), hit.get("chunk_number")) !=
+                   (item.get("paper_id"), item.get("chunk_number")) for item in selected):
+                selected.append(hit)
+        for seed in [*seed_evidence_by_id.get(card_id, []), *question_hits[:2]]:
+            for neighbor in adjacent:
+                if (neighbor["paper_id"] == seed["paper_id"]
+                        and abs(int(neighbor["chunk_number"]) - int(seed["chunk_number"])) <= 1
+                        and all((neighbor["paper_id"], neighbor["chunk_number"]) !=
+                                (item["paper_id"], item["chunk_number"]) for item in selected)):
+                    selected.append(neighbor)
+        selected = selected[:6]
+        evidence_by_id[card_id] = selected
+        all_evidence.extend(selected)
+    verified = verify_flashcards(cards, evidence_by_id)
+    unique_evidence = {(hit["paper_id"], hit["chunk_number"]): hit for hit in all_evidence}
+    logger.info("Flashcard question retrieval completed cards=%d evidence_chunks=%d duration_seconds=%.2f",
+                len(cards), len(unique_evidence), time.perf_counter() - started)
+    return verified, list(unique_evidence.values())
+
+
 @app.post("/api/learning/generate", status_code=201)
 def generate_learning(payload: GenerateRequest, user: dict[str, Any] = Depends(current_user)):
     custom_presentation = payload.kind == "ppt_outline" and payload.presentation_input_type in {"notes", "topic"}
@@ -851,6 +952,7 @@ def generate_learning(payload: GenerateRequest, user: dict[str, Any] = Depends(c
         query = focus
     else:
         query = f"key findings and main ideas from {paper_names}"
+    retrieval_started = time.perf_counter()
     query_embedding = embed_query(query)
     cross_paper_kinds = {"comparison", "literature_review", "research_gap", "research_ideas"}
     if payload.kind == "mindmap" and focus:
@@ -925,6 +1027,8 @@ def generate_learning(payload: GenerateRequest, user: dict[str, Any] = Depends(c
         if payload.kind == "mindmap" and focus:
             raise HTTPException(status_code=422, detail=f'The selected paper does not appear to cover "{focus}". Try a topic discussed in the paper.')
         raise HTTPException(status_code=404, detail="No text passages found for this paper")
+    logger.info("Study evidence retrieved kind=%s requested_count=%d papers=%d chunks=%d duration_seconds=%.2f",
+                payload.kind, payload.count, len(paper_ids), len(hits), time.perf_counter() - retrieval_started)
     try:
         if payload.kind == "mindmap" and focus:
             # Semantic matching accepts synonyms and paraphrases (e.g. a user
@@ -947,12 +1051,96 @@ def generate_learning(payload: GenerateRequest, user: dict[str, Any] = Depends(c
                     detail=f'The selected paper does not appear to cover "{focus}". Try a topic discussed in the paper.',
                 )
         generation_prompt = focus if payload.kind == "mindmap" else query
-        content = generate_study_artifact(
-            payload.kind, generation_prompt, hits, payload.count, payload.difficulty,
-            avoid_questions=payload.avoid_questions, variation_seed=payload.variation_seed,
-        )
+        generation_started = time.perf_counter()
+        if payload.kind == "flashcards":
+            semantic_started = time.perf_counter()
+            representations = []
+            for paper in papers:
+                representation, _ = _semantic_representation_for_paper(paper, user)
+                representations.append(representation)
+            logger.info("Flashcard semantic representation ready papers=%d duration_seconds=%.2f",
+                        len(representations), time.perf_counter() - semantic_started)
+            objectives = plan_flashcard_objectives(representations, payload.count)
+            # Add concept-specific meaning to the plan prompt sent to the card writer.
+            for objective in objectives:
+                matching = [concept for representation in representations
+                            for concept in representation.get("concepts", [])
+                            if _questions_are_equivalent(objective["concept"], concept.get("name"))
+                            or objective["concept"].casefold() in str(concept.get("name", "")).casefold()]
+                objective["document_context"] = " ".join(
+                    [str(concept.get("meaning", "")) for concept in matching[:2]]
+                    + [str(rep.get("summary", ""))[:500] for rep in representations[:2]])[:1400]
+            evidence_by_objective: dict[str, list[dict[str, Any]]] = {}
+            all_objective_evidence: dict[tuple[str, int], dict[str, Any]] = {}
+            for objective in objectives:
+                query_text = f"{objective['query']} {objective['concept']} {objective['objective']}"
+                objective_hits = hybrid_search(query_text, embed_query(query_text), paper_ids, 5, owner_id=user["id"])
+                selected = list(objective_hits[:3])
+                seeds = [{"paper_id": hit["paper_id"], "chunk_number": hit["chunk_number"]}
+                         for hit in objective_hits[:2] if hit.get("paper_id") and type(hit.get("chunk_number")) is int]
+                adjacent = neighboring_chunks(seeds, user["id"], radius=1) if seeds else []
+                for seed in objective_hits[:2]:
+                    for neighbor in adjacent:
+                        if (neighbor["paper_id"] == seed["paper_id"]
+                                and abs(int(neighbor["chunk_number"]) - int(seed["chunk_number"])) <= 1
+                                and all((neighbor["paper_id"], neighbor["chunk_number"]) !=
+                                        (item["paper_id"], item["chunk_number"]) for item in selected)):
+                            selected.append(neighbor)
+                evidence_by_objective[objective["id"]] = selected[:6]
+                all_objective_evidence.update({(hit["paper_id"], hit["chunk_number"]): hit for hit in selected})
+            usable_objectives = [objective for objective in objectives if evidence_by_objective.get(objective["id"])]
+            candidates = generate_planned_flashcards(usable_objectives, evidence_by_objective)
+            candidates = [dict(card, id=card["id"]) for card in candidates]
+            verified_cards, verified_evidence = _verify_flashcard_candidates(
+                candidates, paper_ids, user, seed_evidence_by_id=evidence_by_objective
+            )
+            verified_ids = {card["id"] for card in verified_cards}
+            missing_objectives = [objective for objective in usable_objectives if objective["id"] not in verified_ids]
+            if missing_objectives:
+                logger.info("Regenerating unverified flashcards count=%d", len(missing_objectives))
+                replacements = generate_planned_flashcards(missing_objectives, evidence_by_objective)
+                replacement_verified, replacement_evidence = _verify_flashcard_candidates(
+                    replacements, paper_ids, user, seed_evidence_by_id=evidence_by_objective
+                )
+                verified_cards.extend(card for card in replacement_verified if card["id"] not in verified_ids)
+                verified_evidence.extend(replacement_evidence)
+            distinct_cards = []
+            for card in verified_cards:
+                if len(distinct_cards) >= payload.count:
+                    break
+                if any(_questions_are_equivalent(card.get("front"), old.get("front")) for old in distinct_cards):
+                    continue
+                distinct_cards.append(card)
+            content = {"cards": distinct_cards, "_generation_mode": "semantic_verified"}
+            if len(distinct_cards) < payload.count:
+                content["_generation_notice"] = (
+                    f"Verified {len(distinct_cards)} of {payload.count} requested flashcards. "
+                    "The source did not support enough distinct cards after one regeneration attempt."
+                )
+            if not distinct_cards:
+                raise HTTPException(status_code=422,
+                                    detail="No flashcards passed source verification. Try another paper or a smaller count.")
+            _validate_study_artifact("flashcards", {"cards": distinct_cards}, verified_evidence)
+            logger.info("Two-stage flashcard generation completed requested=%d planned=%d verified=%d evidence_chunks=%d duration_seconds=%.2f",
+                        payload.count, len(objectives), len(distinct_cards), len(all_objective_evidence),
+                        time.perf_counter() - generation_started)
+        else:
+            content = generate_study_artifact(
+                payload.kind, generation_prompt, hits, payload.count, payload.difficulty,
+                avoid_questions=payload.avoid_questions, variation_seed=payload.variation_seed,
+            )
+        if payload.kind == "quiz":
+            logger.info("Quiz generation completed requested=%d generated=%d mode=%s duration_seconds=%.2f",
+                        payload.count, len(content.get("questions", [])), content.get("_generation_mode", "ai"),
+                        time.perf_counter() - generation_started)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Study artifact generation failed kind=%s error_type=%s", payload.kind, type(exc).__name__)
+        raise HTTPException(status_code=503,
+                            detail="Study generation could not complete. Check the configured AI provider and try again.") from exc
     if content.get("_generation_mode") == "source_fallback" and payload.kind != "ppt_outline":
         raise HTTPException(status_code=503, detail=content.get("_generation_notice", "AI generation failed. Please try again."))
     if payload.kind == "mindmap" and focus and not _mindmap_output_matches_focus(focus, content.get("nodes", [])):

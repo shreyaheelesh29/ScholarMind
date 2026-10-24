@@ -14,6 +14,7 @@ export default function QuizPanel({ artifact, answers, setAnswers, onRetake, reg
       <div className="rounded-full bg-primary-50 px-4 py-2 text-sm font-bold text-primary-700">{submitted ? `Score: ${score}/${questions.length}` : `${answeredCount}/${questions.length} answered`}</div>
       <button onClick={onRetake} disabled={regenerating} className="rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-600 disabled:opacity-40">{regenerating ? "Generating…" : "New questions"}</button>
     </div>
+    {artifact.payload?._generation_notice && <p role="status" className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">{artifact.payload._generation_notice}</p>}
     {questions.map((question, questionIndex) => {
       const selectedAnswer = answers[questionIndex];
       const submittedQuestion = result?.questions?.find((item) => item.question_index === questionIndex);

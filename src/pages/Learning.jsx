@@ -64,6 +64,7 @@ export default function Learning() {
   const [generating, setGenerating] = useState(false);
   const [generationError, setGenerationError] = useState("");
   const [generationMode, setGenerationMode] = useState("");
+  const [flashcardNotice, setFlashcardNotice] = useState("");
   const [selectedMindmapNodeId, setSelectedMindmapNodeId] = useState("root");
   const [collapsedMindmapNodes, setCollapsedMindmapNodes] = useState(() => new Set());
   const [expandingMindmapNodes, setExpandingMindmapNodes] = useState(() => new Set());
@@ -103,6 +104,7 @@ export default function Learning() {
         front: cleanFlashcardText(card.front || card.question || card.title, true),
         back: cleanFlashcardText(card.back || card.answer || card.content),
       })));
+      if (typeof cached.flashcardNotice === "string") setFlashcardNotice(cached.flashcardNotice);
       if (cached.generatedCardsArtifactId) setGeneratedCardsArtifactId(cached.generatedCardsArtifactId);
       if (Array.isArray(cached.cardOrder)) setCardOrder(cached.cardOrder);
       if (cached.cardRatings && typeof cached.cardRatings === "object") setCardRatings(cached.cardRatings);
@@ -251,6 +253,7 @@ export default function Learning() {
       setGenerationMode(payload._generation_mode || "");
       if (kind === "flashcards") {
         const cards = normalizeFlashcards(payload.cards || []);
+        setFlashcardNotice(payload._generation_notice || "");
         setGeneratedCards(cards);
         setGeneratedCardsArtifactId(result.artifact.id);
         setCardOrder(cards.map((_, index) => index));
@@ -278,7 +281,7 @@ export default function Learning() {
   useEffect(() => {
     writeLearningSession({
       tab, selectedPaperId, mindmapPrompt, generatedMindmap, generatedMindmapArtifactId,
-      flashcardCount, generatedCardsArtifactId, quizQuestionCount, quizRequestedCount, quizDifficulty,
+      flashcardCount, generatedCardsArtifactId, flashcardNotice, quizQuestionCount, quizRequestedCount, quizDifficulty,
       selectedMindmapNodeId, collapsedMindmapNodes: [...collapsedMindmapNodes], exhaustedMindmapNodes: [...exhaustedMindmapNodes], mindmapZoom, mindmapPan,
       generatedQuiz, quizAnswers, quizSubmitted, quizAttempt, generatedCards, cardOrder, cardRatings,
       retriedCards: [...retriedCards], cardIdx, flipped,
@@ -286,11 +289,11 @@ export default function Learning() {
   }, [tab, selectedPaperId, generatedMindmap, generatedMindmapArtifactId, selectedMindmapNodeId,
     collapsedMindmapNodes, mindmapZoom, mindmapPan, mindmapPrompt, exhaustedMindmapNodes, generatedQuiz, quizAnswers, quizSubmitted, quizAttempt,
     generatedCards, generatedCardsArtifactId, cardOrder, cardRatings, retriedCards, cardIdx, flipped,
-    flashcardCount, quizQuestionCount, quizRequestedCount, quizDifficulty]);
+    flashcardCount, flashcardNotice, quizQuestionCount, quizRequestedCount, quizDifficulty]);
 
   const demoMindmapNodes = [];
   const demoMindmapEdges = [];
-  const visibleCards = generatedCards === null ? flashcards : generatedCards.map((card, i) => ({ id: i + 1, front: cleanFlashcardText(card.front || card.question || card.title || "Study prompt", true), back: cleanFlashcardText(card.back || card.answer || card.content || "No answer supplied") }));
+  const visibleCards = generatedCards === null ? flashcards : generatedCards.map((card, i) => ({ ...card, id: card.id || `flashcard-${i + 1}`, front: cleanFlashcardText(card.front || card.question || card.title || "Study prompt", true), back: cleanFlashcardText(card.back || card.answer || card.content || "No answer supplied") }));
   const masteredCards = Number(dashboardMetrics?.flashcards_mastered) || 0;
   const reviewedCards = Number(dashboardMetrics?.flashcards_reviewed) || 0;
   const totalFlashcards = Number(dashboardMetrics?.flashcards_total) || 0;
@@ -644,7 +647,7 @@ export default function Learning() {
         ))}
       </div>
 
-      {tab === "cards" && <FlashcardsPanel {...{ visibleCards, cardIdx, cardOrder, cardRatings, setCardIdx, setFlipped, flipped, activeCard, activeCardIdx, rateCard, advanceCard }} />}
+      {tab === "cards" && <FlashcardsPanel {...{ visibleCards, cardIdx, cardOrder, cardRatings, setCardIdx, setFlipped, flipped, activeCard, activeCardIdx, rateCard, advanceCard, notice: flashcardNotice }} />}
 
       {tab === "quiz" && <div><QuizPanel key={generatedQuiz?.id || "quiz"} artifact={generatedQuiz} answers={quizAnswers} setAnswers={setQuizAnswers} onRetake={() => regenerateQuiz()} regenerating={quizRegenerating} submitted={quizSubmitted} onSubmit={submitQuiz} submitting={quizSubmitting} submitError={quizSubmitError} result={quizAttempt} /></div>}
 

@@ -1,6 +1,7 @@
-export default function FlashcardsPanel({ visibleCards, cardIdx, cardOrder, cardRatings, setCardIdx, setFlipped, flipped, activeCard, activeCardIdx, rateCard, advanceCard }) {
+export default function FlashcardsPanel({ visibleCards, cardIdx, cardOrder, cardRatings, setCardIdx, setFlipped, flipped, activeCard, activeCardIdx, rateCard, advanceCard, notice = "" }) {
   return (
         <div className="max-w-3xl mx-auto space-y-6">
+          {notice && <div role="status" className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">{notice}</div>}
           {visibleCards.length === 0 ? <div className="rounded-xl border border-dashed border-slate-300 bg-white p-8 text-center text-slate-600">No validated flashcards were returned. Check the configured AI model, then generate again.</div> : cardIdx >= cardOrder.length ? <div className="rounded-2xl border border-primary-100 bg-white p-10 text-center shadow-sm">
             <p className="text-4xl">🎉</p>
             <h2 className="mt-3 text-2xl font-black text-slate-900">Deck reviewed</h2>
@@ -28,6 +29,7 @@ export default function FlashcardsPanel({ visibleCards, cardIdx, cardOrder, card
                 <div className="max-h-44 w-full max-w-lg overflow-y-auto px-2" onClick={(event) => event.stopPropagation()}>
                   <h3 className="break-words text-center text-base font-semibold leading-relaxed text-slate-800 sm:text-lg">{activeCard.back}</h3>
                 </div>
+                {(activeCard.section || activeCard.page) && <p className="mt-3 text-xs text-slate-500">Source{activeCard.section ? ` · ${activeCard.section}` : ""}{activeCard.page ? ` · page ${activeCard.page}` : ""}</p>}
                 <p className="mt-8 text-xs text-slate-400">← Click to flip back</p>
               </div>
             </div>
