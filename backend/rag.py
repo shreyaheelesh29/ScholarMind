@@ -1831,6 +1831,7 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
             result["difficulty"] = difficulty
         if kind == "mindmap":
             _attach_mindmap_evidence(result, source_hits)
+            _add_source_grounded_mindmap_depth(result, source_hits)
         _validate_study_artifact(kind, result, source_hits)
         if kind == "research_gap" and not result.get("gaps"):
             return _source_research_gap_result(source_hits, count)
@@ -2218,6 +2219,37 @@ def _extractive_mindmap_children(node_id: str, node_label: str, breadcrumb: list
     return children
 
 
+def _add_source_grounded_mindmap_depth(result: dict[str, Any], hits: list[dict[str, Any]]) -> None:
+    """Add a second level of cited subtopics wherever a map has only root branches."""
+    nodes = result.get("nodes")
+    edges = result.get("edges")
+    if not isinstance(nodes, list) or not isinstance(edges, list):
+        return
+    by_id = {str(node.get("id")): node for node in nodes if isinstance(node, dict)}
+    root_children = [edge.get("target") for edge in edges
+                     if isinstance(edge, dict) and edge.get("source") == "root"]
+    known_nodes = [{"id": str(node.get("id", "")), "label": str(node.get("label", ""))}
+                   for node in nodes if isinstance(node, dict)]
+    for parent_id in root_children:
+        if not isinstance(parent_id, str) or any(
+            isinstance(edge, dict) and edge.get("source") == parent_id for edge in edges
+        ):
+            continue
+        parent = by_id.get(parent_id)
+        if not parent:
+            continue
+        grandchildren = _extractive_mindmap_children(
+            parent_id, str(parent.get("label", "")),
+            [str(by_id.get("root", {}).get("label", "")), str(parent.get("label", ""))],
+            known_nodes, hits, 3,
+        )
+        if grandchildren:
+            nodes.extend(grandchildren)
+            known_nodes.extend({"id": child["id"], "label": child["label"]} for child in grandchildren)
+            edges.extend({"source": parent_id, "target": child["id"], "label": "includes"}
+                         for child in grandchildren)
+
+
 def _source_grounded_mindmap(hits: list[dict[str, Any]], focus: str = "") -> dict[str, Any]:
     """Build a fully cited map from source sentences when the local model map is unusable."""
     readable_hits = [hit for hit in hits if isinstance(hit.get("content"), str)
@@ -2252,6 +2284,7 @@ def _source_grounded_mindmap(hits: list[dict[str, Any]], focus: str = "") -> dic
         "_generation_notice": "The local model map did not pass source validation; this map was built from cited source sentences.",
     }
     _attach_mindmap_evidence(result, readable_hits)
+    _add_source_grounded_mindmap_depth(result, readable_hits)
     _validate_study_artifact("mindmap", result, readable_hits)
     result["_generation_mode"] = "source_extraction"
     return result
@@ -2316,6 +2349,7 @@ def expand_mindmap_node(node_id: str, node_label: str, breadcrumb: list[str], co
         {"role": "system", "content": "Return only valid JSON matching the requested schema. Be precise and source-grounded."},
         {"role": "user", "content": prompt},
     ]
+    used_source_extraction = False
     try:
         raw = _chat_request(
             base_url, model, messages, timeout=mindmap_timeout if local_ollama else 60,
@@ -2380,6 +2414,14 @@ def expand_mindmap_node(node_id: str, node_label: str, breadcrumb: list[str], co
             used_labels.add(label.casefold())
 
         if not expanded_children:
+            # A small local model can reject or omit otherwise useful branches.
+            # Recover from the same retrieved passages so deeper nodes remain
+            # available without weakening page citation validation.
+            expanded_children = _extractive_mindmap_children(
+                node_id, node_label, breadcrumb, existing_nodes, hits, 3,
+            )
+            used_source_extraction = bool(expanded_children)
+        if not expanded_children:
             return {
                 "parent_id": node_id, "children": [], "edges": [], "generation_mode": "source_exhausted",
                 "exhausted": True,
@@ -2398,9 +2440,32 @@ def expand_mindmap_node(node_id: str, node_label: str, breadcrumb: list[str], co
                     and not any(edge["source"] == source and edge["target"] == target for edge in edges)):
                 edges.append({"source": source, "target": target, "label": label})
         return {"parent_id": node_id, "children": expanded_children, "edges": edges,
-                "generation_mode": "ai", "exhausted": False, "message": None}
+                "generation_mode": "source_extraction" if used_source_extraction else "ai",
+                "exhausted": False,
+                "message": "Added branches directly from cited source passages." if used_source_extraction else None}
     except Exception as exc:
         logger.warning("AI mind-map expansion failed: %s", exc, exc_info=True)
+        try:
+            recovered = _extractive_mindmap_children(
+                node_id, node_label, breadcrumb, existing_nodes, hits, 3,
+            )
+            if recovered:
+                return {
+                    "parent_id": node_id,
+                    "children": recovered,
+                    "edges": [{"source": node_id, "target": item["id"], "label": "includes"}
+                              for item in recovered],
+                    "generation_mode": "source_extraction",
+                    "exhausted": False,
+                    "message": "Added branches directly from cited source passages.",
+                }
+            return {
+                "parent_id": node_id, "children": [], "edges": [],
+                "generation_mode": "source_exhausted", "exhausted": True,
+                "message": "No more distinct, source-supported subtopics remain under this branch.",
+            }
+        except Exception:
+            logger.warning("Source-grounded mind-map expansion recovery failed", exc_info=True)
         if isinstance(exc, ValueError):
             raise
         raise ValueError(_generation_failure_reason(
@@ -3019,8 +3084,8 @@ def _validate_study_artifact(kind: str, result: Any, hits: list[dict[str, Any]])
         nodes, edges = result.get("nodes"), result.get("edges")
         if not isinstance(nodes, list) or len(nodes) < 5 or not isinstance(edges, list):
             raise ValueError("Mind map is incomplete: it needs a root and at least four supported concepts")
-        if len(nodes) > 9:
-            raise ValueError("Mind map has too many nodes; keep it to one root and up to eight concepts")
+        if len(nodes) > 25:
+            raise ValueError("Mind map has too many nodes; keep it to one root and at most 24 concepts")
         if len(edges) < len(nodes) - 1:
             raise ValueError("Mind map concepts are missing relationship links")
         if not isinstance(edges, list):
