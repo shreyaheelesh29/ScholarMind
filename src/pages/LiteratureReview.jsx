@@ -3,7 +3,8 @@ import { Link, useSearchParams } from "react-router-dom";
 import ArtifactGenerator from "../components/research/ArtifactGenerator";
 import { apiFetch } from "../api";
 
-function ReviewWorkspace(payload, { papers, artifact }) {
+function ReviewWorkspace(payload, { papers, paperIds, artifact }) {
+  const reviewLabel = paperIds.length > 1 ? "Cross-paper synthesis" : "Within-paper themes";
   const sections = Array.isArray(payload?.sections) ? payload.sections : [];
   const initialDraft = useMemo(() => sections.map((section) => {
     const refs = (section.sources || []).map((source) => `[${source.paper || "Source"}, p. ${source.page || "?"}]`).join("; ");
@@ -31,7 +32,7 @@ function ReviewWorkspace(payload, { papers, artifact }) {
   };
 
   return <div className="space-y-4">
-    {sections.map((section, index) => <article key={`${section.title}-${index}`} className="rounded-xl border border-slate-200 p-4"><div className="flex flex-wrap items-start justify-between gap-3"><h4 className="font-semibold text-slate-900">{section.title || `Theme ${index + 1}`}</h4><span className="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-semibold text-slate-600">Cross-paper synthesis</span></div><p className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-slate-700">{section.content}</p><div className="mt-3 flex flex-wrap gap-2">{(section.sources || []).map((source, sourceIndex) => {
+    {sections.map((section, index) => <article key={`${section.title}-${index}`} className="rounded-xl border border-slate-200 p-4"><div className="flex flex-wrap items-start justify-between gap-3"><h4 className="font-semibold text-slate-900">{section.title || `Theme ${index + 1}`}</h4><span className="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-semibold text-slate-600">{reviewLabel}</span></div><p className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-slate-700">{section.content}</p><div className="mt-3 flex flex-wrap gap-2">{(section.sources || []).map((source, sourceIndex) => {
       const paper = papers.find((item) => item.filename.toLowerCase() === String(source.paper || "").toLowerCase());
       const label = `${source.paper || "Source"}${source.page ? ` · p. ${source.page}` : ""}`;
       return paper && source.page ? <Link key={`${label}-${sourceIndex}`} to={`/viewer?paperId=${encodeURIComponent(paper.id)}&page=${source.page}`} className="rounded-full bg-indigo-50 px-3 py-1 text-xs font-medium text-indigo-700 hover:bg-indigo-100">{label} ↗</Link> : <span key={`${label}-${sourceIndex}`} className="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-600">{label}</span>;
@@ -48,14 +49,16 @@ export default function LiteratureReview() {
       <header>
         <p className="text-sm font-medium text-primary-600">AI research analysis</p>
         <h1 className="mt-1 text-3xl font-bold text-slate-900">Literature Review</h1>
-        <p className="mt-2 max-w-3xl text-slate-600">Compare themes across papers, surface supported agreements and disagreements, and turn the result into an editable cited draft.</p>
+        <p className="mt-2 max-w-3xl text-slate-600">Select one paper for a thematic review, or several related papers to compare supported agreements and differences. Every section links back to its cited pages and can be edited as a draft.</p>
       </header>
       <ArtifactGenerator
         kinds={["literature_review"]}
         multiPaper
         maxPapers={10}
         initialPaperIds={selectedIds}
-        promptContext="Synthesize themes across the selected papers. Explicitly separate shared findings from disagreements or differences in methods/results. Tie every factual statement to the supplied source passages and page references; state when papers cannot be directly compared."
+        promptContext={({ paperIds }) => paperIds.length > 1
+          ? "Synthesize themes across the selected papers. Separate shared findings from disagreements or differences in methods and results. Tie factual statements to supplied source passages and page references; state when papers cannot be directly compared."
+          : "Create a thematic review of this single paper. Organize its aims, approach, findings, and stated limitations into useful themes. Do not imply comparison, consensus, or disagreement across papers. Tie factual statements to supplied source passages and page references."}
         heading="Synthesize selected papers into a literature review"
         renderPayload={ReviewWorkspace}
       />

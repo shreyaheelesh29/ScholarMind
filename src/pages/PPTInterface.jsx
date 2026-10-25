@@ -36,6 +36,8 @@ export default function PPTInterface() {
   const [draggedIndex, setDraggedIndex] = useState(null);
   const [editingId, setEditingId] = useState(null);
   const [notesExpanded, setNotesExpanded] = useState(true);
+  const [notesSaveState, setNotesSaveState] = useState("saved");
+  const notesSaveQueueRef = useRef(Promise.resolve());
   const slidePreviewRef = useRef(null);
   const presenterNotesRef = useRef(null);
   const [previewScroll, setPreviewScroll] = useState({ canScroll: false, atBottom: false });
@@ -89,8 +91,8 @@ export default function PPTInterface() {
       : detail);
   };
 
-  const persistSlideEdits = (nextSlides) => {
-    if (!pptArtifact?.id) return;
+  const persistSlideEdits = (nextSlides, { presenterNotes = false } = {}) => {
+    if (!pptArtifact?.id) return Promise.resolve(false);
     const payload = {
       ...(pptArtifact.payload || {}),
       slides: nextSlides.map((item) => ({
@@ -102,11 +104,21 @@ export default function PPTInterface() {
       })),
     };
     setPptArtifact((item) => ({ ...item, payload }));
-    apiFetch(`/artifacts/${pptArtifact.id}`, {
+    if (presenterNotes) setNotesSaveState("saving");
+    const request = notesSaveQueueRef.current.catch(() => {}).then(() => apiFetch(`/artifacts/${pptArtifact.id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ payload }),
-    }).catch((err) => reportError(err.status === 401 ? err : new Error(`Could not save slide changes: ${err.message}`)));
+    }));
+    notesSaveQueueRef.current = request;
+    return request.then(() => {
+      if (presenterNotes) setNotesSaveState("saved");
+      return true;
+    }).catch((err) => {
+      if (presenterNotes) setNotesSaveState("error");
+      reportError(err.status === 401 ? err : new Error(`Could not save ${presenterNotes ? "presenter notes" : "slide changes"}: ${err.message}`));
+      return false;
+    });
   };
 
   const addSlide = () => {
@@ -179,19 +191,13 @@ export default function PPTInterface() {
         speakerNotes: item.speaker_notes || "", page: item.page, pages: Array.isArray(item.pages) ? item.pages : (item.page ? [item.page] : []), icon: "📄", gradient: ["from-indigo-500 to-purple-500", "from-blue-500 to-cyan-500", "from-emerald-500 to-teal-500"][i % 3],
       }));
       if (!generated.length) throw new Error("The service returned no slides. Try again with a different paper.");
-      setSlides(generated); setCurrent(0); setGenerationProgress(100);
+      setSlides(generated); setCurrent(0); setGenerationProgress(100); setNotesSaveState("saved");
       setNotesExpanded(true);
     } catch (err) { reportError(err); }
     finally { setGenerating(false); }
   };
 
-  const savePresenterNotes = (notes) => {
-    if (!pptArtifact?.id) return;
-    const previous = pptArtifact.payload || {};
-    const payload = { ...previous, slides: (previous.slides || []).map((item, i) => i === current ? { ...item, speaker_notes: notes } : item) };
-    setPptArtifact((item) => ({ ...item, payload }));
-    apiFetch(`/artifacts/${pptArtifact.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ payload }) }).catch((err) => reportError(err.status === 401 ? err : new Error(`Could not save presenter notes: ${err.message}`)));
-  };
+  const savePresenterNotes = () => persistSlideEdits(slides, { presenterNotes: true });
 
   const handleDownload = async () => {
     if (!slides.length) return;
@@ -725,12 +731,27 @@ export default function PPTInterface() {
               <textarea
                 aria-label={`Presenter notes for slide ${current + 1}`}
                 value={slide.speakerNotes || ""}
-                onChange={(event) => setSlides((existing) => existing.map((item, i) => i === current ? { ...item, speakerNotes: event.target.value } : item))}
-                onBlur={(event) => savePresenterNotes(event.target.value)}
+                onChange={(event) => {
+                  setSlides((existing) => existing.map((item, i) => i === current ? { ...item, speakerNotes: event.target.value } : item));
+                  setNotesSaveState("unsaved");
+                }}
                 rows={6}
                 placeholder="Write what you plan to say: explain the slide’s key point, connect the evidence, and transition to the next slide…"
                 className="mt-3 w-full resize-y rounded-xl border border-slate-200 bg-slate-50 px-3 py-3 text-sm leading-relaxed text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-indigo-300 focus:bg-white focus:ring-4 focus:ring-indigo-100"
               />
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+                <span className={`text-xs font-semibold ${notesSaveState === "error" ? "text-red-600" : notesSaveState === "unsaved" ? "text-amber-700" : "text-slate-500"}`} role="status" aria-live="polite">
+                  {notesSaveState === "saving" ? "Saving presenter notes…" : notesSaveState === "unsaved" ? "Unsaved changes. Save to keep your edits." : notesSaveState === "error" ? "Could not save. Try again." : "All presenter notes saved."}
+                </span>
+                <button
+                  type="button"
+                  onClick={savePresenterNotes}
+                  disabled={notesSaveState === "saving" || notesSaveState === "saved" || !pptArtifact?.id}
+                  className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-bold text-white shadow-sm transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:bg-slate-300 disabled:text-slate-600"
+                >
+                  {notesSaveState === "saving" ? "Saving…" : "Save notes"}
+                </button>
+              </div>
             </div>}
           </section>}
 

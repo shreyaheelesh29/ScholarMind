@@ -252,11 +252,17 @@ def save_chunks(chunks: list[dict[str, Any]], embeddings: list[list[float]]) -> 
               VALUES (%s, %s, %s, %s, %s, %s)""", rows)
         conn.commit()
 
-def list_papers() -> list[dict[str, Any]]:
+def list_papers(owner_id: str | None = None) -> list[dict[str, Any]]:
     with connection() as conn, conn.cursor(row_factory=psycopg.rows.dict_row) as cursor:
-        cursor.execute("""SELECT p.id::text, p.owner_id::text, p.filename, p.page_count, p.file_type, p.created_at, COUNT(c.id)::int AS chunk_count
+        query = """SELECT p.id::text, p.owner_id::text, p.filename, p.page_count, p.file_type, p.created_at, COUNT(c.id)::int AS chunk_count
                        FROM papers p LEFT JOIN paper_chunks c ON c.paper_id = p.id
-                       GROUP BY p.id ORDER BY p.created_at DESC""")
+                       """
+        params: tuple[str, ...] = ()
+        if owner_id is not None:
+            query += " WHERE p.owner_id = %s"
+            params = (owner_id,)
+        query += " GROUP BY p.id ORDER BY p.created_at DESC"
+        cursor.execute(query, params)
         return list(cursor.fetchall())
 
 def get_paper(paper_id: str) -> dict[str, Any] | None:

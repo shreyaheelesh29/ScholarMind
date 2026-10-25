@@ -15,6 +15,34 @@ services:
       retries: 10
     networks: [internal]
 
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    networks: [internal]
+
+  ollama-model:
+    image: ollama/ollama:latest
+    restart: "no"
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      LLM_MODEL: ${LLM_MODEL:-qwen3:4b}
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["ollama pull \"$$LLM_MODEL\""]
+    volumes:
+      - ollama_data:/root/.ollama
+    depends_on:
+      ollama:
+        condition: service_healthy
+    networks: [internal]
+
   backend:
     build:
       context: .
@@ -26,8 +54,8 @@ services:
       AUTH_SECRET: ${AUTH_SECRET:?Set a random AUTH_SECRET in deploy.env}
       ADMIN_EMAILS: ${ADMIN_EMAILS:-}
       LLM_API_KEY: ${LLM_API_KEY:-}
-      LLM_BASE_URL: ${LLM_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai}
-      LLM_MODEL: ${LLM_MODEL:-gemini-3.8-flash}
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://ollama:11434}
+      LLM_MODEL: ${LLM_MODEL:-qwen3:4b}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-all-MiniLM-L6-v2}
       PAPER_STORAGE_DIR: /app/data/papers
       HF_HOME: /var/cache/huggingface
@@ -38,6 +66,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      ollama-model:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=5)"]
       interval: 30s
@@ -76,6 +106,7 @@ volumes:
   postgres_data:
   paper_files:
   model_cache:
+  ollama_data:
   caddy_data:
   caddy_config:
 

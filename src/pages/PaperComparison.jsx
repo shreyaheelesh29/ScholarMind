@@ -19,7 +19,7 @@ export default function PaperComparison() {
         <p className="text-sm font-medium text-primary-600">AI research analysis</p>
         <h1 className="mt-1 text-3xl font-bold text-slate-900">Compare Papers</h1>
         <p className="mt-2 max-w-3xl text-slate-600">
-          Select two or three PDFs from your library. ScholarMind retrieves passages from each selected paper and generates a cited comparison of their methods, evidence, findings, and limitations.
+          Select two or three papers from your library. ScholarMind retrieves passages from each selected paper and generates a cited comparison of their methods, evidence, findings, and limitations. Upload a second paper first if your library contains only one.
         </p>
       </header>
       <ArtifactGenerator

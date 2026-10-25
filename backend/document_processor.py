@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,7 @@ from docx import Document
 from docx.table import Table
 from docx.text.paragraph import Paragraph
 from pptx import Presentation
+from pptx.enum.shapes import MSO_SHAPE_TYPE
 
 
 if os.name == "nt" and not shutil.which("tesseract"):
@@ -56,13 +58,7 @@ def extract_pdf(file_path: Path) -> dict[str, Any]:
 
                 text = pytesseract.image_to_string(image).strip()
 
-            if text:
-                pages.append(
-                    {
-                        "page_number": page_number,
-                        "text": text,
-                    }
-                )
+            pages.append({"page_number": page_number, "text": text})
 
         page_count = len(document)
 
@@ -145,15 +141,29 @@ def extract_pptx(file_path: Path) -> dict[str, Any]:
     ):
         slide_text = collect_shape_text(slide.shapes)
 
+        # Slides that are screenshots or scanned images have no shape text.
+        # OCR their embedded pictures so they can contribute to the viewer and
+        # source-grounded summaries when Tesseract is available.
+        if not slide_text:
+            for shape in slide.shapes:
+                if shape.shape_type != MSO_SHAPE_TYPE.PICTURE:
+                    continue
+                try:
+                    image = Image.open(BytesIO(shape.image.blob)).convert("RGB")
+                    image.thumbnail((2400, 2400))
+                    recognized = pytesseract.image_to_string(image).strip()
+                    if recognized:
+                        slide_text.append(recognized)
+                except Exception:
+                    # Some embedded formats are not readable by Pillow; keep
+                    # the slide in the index even if it has no extractable text.
+                    continue
+
         combined_text = "\n".join(slide_text).strip()
 
-        if combined_text:
-            slides.append(
-                {
-                    "page_number": slide_number,
-                    "text": combined_text,
-                }
-            )
+        # Preserve physical slide numbering, including image-only slides. The
+        # viewer and citations use page_number as a 1-based slide index.
+        slides.append({"page_number": slide_number, "text": combined_text})
 
     return {
         "text": "\n\n".join(

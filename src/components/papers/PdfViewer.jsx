@@ -2,6 +2,41 @@ import { useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { apiFetch } from "../../api";
 
+function DocumentPageText({ text, title }) {
+  const lines = String(text || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const numbered = lines.map((line, index) => {
+    const match = line.match(/^(\d{1,2})(?:[.)]\s*(.*)|\s+(.*)|$)$/);
+    return match ? { index, number: Number(match[1]), inline: (match[2] || match[3] || "").trim() } : null;
+  }).filter(Boolean);
+  const isStepSequence = numbered.length >= 2
+    && numbered.every((step, index) => step.number === index + 1);
+
+  if (!isStepSequence) {
+    return <p className="mt-5 whitespace-pre-wrap text-sm leading-7 text-slate-700">{text || "No extracted text is available for this page."}</p>;
+  }
+
+  const introLines = lines.slice(0, numbered[0].index).filter((line) => line.toLowerCase() !== String(title || "").toLowerCase());
+  const steps = numbered.map((step, index) => {
+    const end = numbered[index + 1]?.index ?? lines.length;
+    const following = lines.slice(step.index + 1, end);
+    const label = step.inline || following.shift() || `Step ${step.number}`;
+    return { number: step.number, label, details: following };
+  });
+
+  return <div className="mt-5 space-y-4">
+    {introLines.length > 0 && <p className="text-sm leading-7 text-slate-600">{introLines.join(" · ")}</p>}
+    <ol className="space-y-3" aria-label="Numbered steps">
+      {steps.map((step) => <li key={step.number} className="flex gap-4 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+        <span className="grid size-9 shrink-0 place-items-center rounded-full bg-indigo-600 text-sm font-bold text-white shadow-sm">{step.number}</span>
+        <div className="min-w-0 pt-1">
+          <h3 className="font-semibold leading-6 text-slate-900">{step.label}</h3>
+          {step.details.length > 0 && <div className="mt-1 space-y-1 text-sm leading-6 text-slate-600">{step.details.map((detail, index) => <p key={index}>{detail}</p>)}</div>}
+        </div>
+      </li>)}
+    </ol>
+  </div>;
+}
+
 export default function PdfViewer() {
   const [searchParams, setSearchParams] = useSearchParams();
   const paperId = searchParams.get("paperId");
@@ -179,7 +214,7 @@ export default function PdfViewer() {
         <div className="mx-auto max-w-3xl rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
           <p className="text-xs font-semibold uppercase tracking-wide text-indigo-600">{paper.file_type?.replace(".", "").toUpperCase() || "DOCUMENT"} · Page / slide {currentPage} of {totalPages}</p>
           <h2 className="mt-2 text-xl font-bold text-slate-900">{pdfIndex.pages[currentPage - 1]?.title || `Page ${currentPage}`}</h2>
-          <p className="mt-5 whitespace-pre-wrap text-sm leading-7 text-slate-700">{pdfIndex.pages[currentPage - 1]?.text || "No extracted text is available for this page."}</p>
+          <DocumentPageText text={pdfIndex.pages[currentPage - 1]?.text} title={pdfIndex.pages[currentPage - 1]?.title} />
           <p className="mt-6 border-t border-slate-100 pt-3 text-xs text-slate-500">Text extracted from the uploaded file. Original layout and images are not shown in this viewer.</p>
         </div>
       </article>}

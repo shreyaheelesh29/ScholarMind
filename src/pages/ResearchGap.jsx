@@ -52,7 +52,7 @@ export default function ResearchGap() {
     <header className="rounded-2xl border border-amber-100 bg-gradient-to-br from-amber-50 via-white to-white p-6 sm:p-8">
       <p className="text-sm font-semibold text-amber-800">Find what the papers actually leave open</p>
       <h1 className="mt-1 text-3xl font-bold text-slate-900">Research Gaps</h1>
-      <p className="mt-2 max-w-3xl text-slate-600">Look for limitations, explicit future-work statements, and unresolved questions in a small set of related papers. Each candidate needs a cited passage; silence in the retrieved text is not evidence that a topic is unexplored.</p>
+      <p className="mt-2 max-w-3xl text-slate-600">Look for limitations, explicit future-work statements, and unresolved questions in one or more related papers. Results must cite a passage that states the issue; general paper descriptions won’t be presented as research gaps.</p>
     </header>
     <ArtifactGenerator
       kinds={["research_gap"]}

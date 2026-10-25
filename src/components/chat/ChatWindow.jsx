@@ -58,6 +58,37 @@ const renderContentWithCitations = (content, citations) => {
   return segments.length > 0 ? segments : content;
 };
 
+function contextualFollowUps(question, answer, citations = []) {
+  const stopWords = new Set("about after again also among answer based because been being both could does each from have into its more most other paper papers says show shown than that their them then there these they this those through using was were what when where which while with would your method result findings research study authors evidence source scholarmind platform assistant system main finding".split(" "));
+  const sourceText = `${answer || ""} ${citations.map((item) => `${item.section || ""} ${item.excerpt || ""}`).join(" ")}`
+    .replace(/\[\d+\]/g, " ")
+    .replace(/https?:\/\/\S+/g, " ");
+  const tokens = sourceText.match(/[A-Za-z][A-Za-z0-9-]*/g) || [];
+  const frequencies = new Map();
+  for (const token of tokens) {
+    const normalized = token.toLowerCase();
+    if (normalized.length < 4 || stopWords.has(normalized)) continue;
+    frequencies.set(normalized, (frequencies.get(normalized) || 0) + 1);
+  }
+  const rankedTerms = [...frequencies.entries()]
+    .sort((left, right) => right[1] - left[1] || right[0].length - left[0].length)
+    .map(([term]) => term);
+
+  const topicMatch = question.match(/\b(?:about|regarding|concerning|using|with)\s+(.+?)[?.!]*$/i);
+  const queryTopic = topicMatch?.[1]?.trim().split(/\s+/).slice(0, 6).join(" ");
+  const primaryTopic = queryTopic || rankedTerms[0] || "this finding";
+  const secondaryTopic = rankedTerms.find((term) => term !== primaryTopic.toLowerCase()) || "the study's approach";
+  const firstSentence = (answer || "").split(/[.!?]/)[0]?.replace(/\[\d+\]/g, "").trim();
+  const conciseClaim = firstSentence?.split(/\s+/).slice(0, 9).join(" ").replace(/[,;:]$/, "") || primaryTopic;
+
+  const suggestions = [
+    `How does ${primaryTopic} connect to the paper's main finding?`,
+    `What evidence supports ${conciseClaim}?`,
+    `What does the paper say about ${secondaryTopic}?`,
+  ];
+  return [...new Set(suggestions)].slice(0, 3);
+}
+
 export default function ChatWindow() {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
@@ -458,15 +489,15 @@ export default function ChatWindow() {
                     </div>
                   )}
                 </div>
-                {msg.role === "assistant" && msg.id === latestAssistantId && !isTyping && (msg.citations?.length > 0) && (
+                {msg.role === "assistant" && msg.id === latestAssistantId && !isTyping && !msg.content?.startsWith("I couldn’t generate a synthesized reply") && (msg.citations?.length > 0) && (
                   <div className="mt-3">
                     <p className="mb-2 px-1 text-[10px] font-semibold uppercase tracking-wider text-slate-400">Continue exploring</p>
                     <div className="flex flex-wrap gap-2">
-                      {[
-                        "Explain this more simply",
-                        "What evidence supports this answer?",
-                        "What limitations does the paper mention?",
-                      ].map((suggestion) => (
+                      {contextualFollowUps(
+                        [...messages.slice(0, messages.indexOf(msg))].reverse().find((item) => item.role === "user")?.content || "",
+                        msg.content,
+                        msg.citations,
+                      ).map((suggestion) => (
                         <button
                           key={suggestion}
                           type="button"
