@@ -21,7 +21,7 @@ function GapSources({ sources, papers }) {
   </div>;
 }
 
-function ResearchGapOutput(payload, { papers }) {
+function ResearchGapOutput({ payload, papers }) {
   const gaps = Array.isArray(payload?.gaps) ? payload.gaps : Array.isArray(payload) ? payload : null;
   const extractedOnly = payload?._generation_mode === "source_extraction";
   const exploratoryOnly = payload?._generation_mode === "source_exploration";

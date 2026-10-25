@@ -75,7 +75,7 @@ function IdeaCard({ idea, index, papers }) {
   </article>;
 }
 
-function ResearchIdeasOutput(payload, { papers }) {
+function ResearchIdeasOutput({ payload, papers }) {
   const ideas = Array.isArray(payload?.ideas) ? payload.ideas : Array.isArray(payload) ? payload : null;
   if (!ideas) return <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm leading-relaxed text-amber-900">The response did not contain proposals in the expected format. You can still review the generated material below.</div>;
   if (ideas.length === 0) return <p className="rounded-xl bg-slate-50 p-4 text-sm text-slate-600">No complete proposals came back for this request. Try narrowing the topic or selecting different papers.</p>;

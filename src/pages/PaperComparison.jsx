@@ -2,7 +2,7 @@ import { useMemo } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import ArtifactGenerator from "../components/research/ArtifactGenerator";
 
-function ComparisonMatrix(payload, { papers, paperIds }) {
+function ComparisonMatrix({ payload, papers, paperIds }) {
   const rows = Array.isArray(payload?.comparisons) ? payload.comparisons : [];
   const selected = paperIds.map((id) => papers.find((paper) => paper.id === id)).filter(Boolean).slice(0, 3);
   if (!rows.length) return <p className="rounded-lg bg-slate-50 p-4 text-sm text-slate-600">No comparable evidence was returned for these papers.</p>;

@@ -3,7 +3,7 @@ import { Link, useSearchParams } from "react-router-dom";
 import ArtifactGenerator from "../components/research/ArtifactGenerator";
 import { apiFetch } from "../api";
 
-function ReviewWorkspace(payload, { papers, paperIds, artifact }) {
+function ReviewWorkspace({ payload, papers, paperIds, artifact }) {
   const reviewLabel = paperIds.length > 1 ? "Cross-paper synthesis" : "Within-paper themes";
   const sections = Array.isArray(payload?.sections) ? payload.sections : [];
   const initialDraft = useMemo(() => sections.map((section) => {
