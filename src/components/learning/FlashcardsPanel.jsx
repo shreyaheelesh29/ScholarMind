@@ -2,7 +2,7 @@ export default function FlashcardsPanel({ visibleCards, cardIdx, cardOrder, card
   return (
         <div className="max-w-3xl mx-auto space-y-6">
           {notice && <div role="status" className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">{notice}</div>}
-          {visibleCards.length === 0 ? <div className="rounded-xl border border-dashed border-slate-300 bg-white p-8 text-center text-slate-600">No validated flashcards were returned. Check the configured AI model, then generate again.</div> : cardIdx >= cardOrder.length ? <div className="rounded-2xl border border-primary-100 bg-white p-10 text-center shadow-sm">
+          {visibleCards.length === 0 ? <div className="rounded-xl border border-dashed border-slate-300 bg-white p-8 text-center text-slate-600">No source-grounded flashcards could be built from the retrieved text. Try a paper with readable text or adjust the focus.</div> : cardIdx >= cardOrder.length ? <div className="rounded-2xl border border-primary-100 bg-white p-10 text-center shadow-sm">
             <p className="text-4xl">🎉</p>
             <h2 className="mt-3 text-2xl font-black text-slate-900">Deck reviewed</h2>
             <p className="mt-2 text-slate-600">You marked {Object.keys(cardRatings).length} of {visibleCards.length} cards. Cards marked Again were shown once more.</p>

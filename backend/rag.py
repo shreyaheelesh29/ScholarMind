@@ -218,6 +218,91 @@ def _source_backed_flashcards(hits: list[dict[str, Any]], existing: list[dict[st
     return facts
 
 
+def _source_backed_quiz_questions(hits: list[dict[str, Any]], existing: list[str],
+                                  needed: int) -> list[dict[str, Any]]:
+    """Build a small, fully cited quiz from extractable source facts when a model batch is unusable."""
+    facts = _source_backed_flashcards(hits, [], max(4, needed * 4))
+    concepts: list[str] = []
+    for fact in facts:
+        front = str(fact.get("front", ""))
+        concept = re.sub(r"^What does the paper report about\s+|\?+$", "", front, flags=re.IGNORECASE).strip()
+        if concept and _question_key(concept) not in {_question_key(item) for item in concepts}:
+            concepts.append(concept)
+
+    questions: list[dict[str, Any]] = []
+    prior_keys = [_question_key(question) for question in existing]
+    for fact in facts:
+        if len(questions) >= needed:
+            break
+        front = str(fact.get("front", ""))
+        answer = re.sub(r"^What does the paper report about\s+|\?+$", "", front, flags=re.IGNORECASE).strip()
+        statement = str(fact.get("back", "")).strip()
+        if not answer or not statement:
+            continue
+        masked = re.sub(re.escape(answer), "____", statement, count=1, flags=re.IGNORECASE)
+        if masked == statement:
+            continue
+        question = f"Which term completes this paper finding? {masked}"
+        if any(_questions_are_equivalent(question, prior) for prior in existing):
+            continue
+        distractors = [concept for concept in concepts if _question_key(concept) != _question_key(answer)]
+        options = [answer, *distractors[:3]]
+        if len({_question_key(option) for option in options}) != 4:
+            continue
+        item = {
+            "question": question,
+            "options": options,
+            "answer": 0,
+            "explanation": statement,
+            "evidence": statement,
+            "page": fact.get("page"),
+        }
+        if _question_key(question) in prior_keys:
+            continue
+        questions.append(item)
+        existing.append(question)
+        prior_keys.append(_question_key(question))
+    return questions
+
+
+def _source_grounded_recovery(kind: str, hits: list[dict[str, Any]], count: int,
+                              difficulty: str, avoid_questions: list[str] | None = None) -> dict[str, Any]:
+    """Return validated study items extracted directly from retrieved source text."""
+    if kind == "flashcards":
+        items = _source_backed_flashcards(hits, [], count)
+        for card in items:
+            card["evidence"] = card["back"]
+        key = "cards"
+    else:
+        items = _source_backed_quiz_questions(hits, list(avoid_questions or []), count)
+        key = "questions"
+    result: dict[str, Any] = {key: items, "_generation_mode": "source_extraction"}
+    if kind == "quiz":
+        result["difficulty"] = difficulty
+    verified_items = []
+    for item in items:
+        candidate = {key: [item]}
+        if kind == "quiz":
+            candidate["difficulty"] = difficulty
+        try:
+            _validate_study_artifact(kind, candidate, hits)
+        except (TypeError, ValueError, KeyError):
+            continue
+        if candidate.get(key):
+            verified_items.extend(candidate[key])
+    result[key] = verified_items
+    if verified_items:
+        result["_generation_notice"] = (
+            "The local model returned incomplete or invalid output, so these items were built from exact retrieved paper passages."
+        )
+    else:
+        result["_generation_notice"] = (
+            "The retrieved text did not contain enough distinct, readable evidence for this study set. "
+            "Try another paper or focus."
+        )
+    return result
+
+
 def _analysis_context(hits: list[dict[str, Any]], max_chars: int = 1800) -> str:
     """Give analysis models short passage IDs; the backend resolves citations."""
     return "\n\n".join(
@@ -1259,6 +1344,7 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
         # bounded chunks, carrying prior quiz questions forward to avoid repeats.
         item_key = "questions" if kind == "quiz" else "cards"
         combined: list[dict[str, Any]] = []
+        model_item_count = 0
         prior_questions = list(avoid_questions or [])
         def prompt_key(value: Any) -> str:
             return " ".join(re.findall(r"[a-z0-9]+", str(value or "").casefold()))
@@ -1286,7 +1372,7 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
             # passing the full hit list would otherwise keep reusing its first
             # few passages for every batch.
             evidence_window = max(3, min(8, generation_count))
-            max_attempts = 2 if kind == "flashcards" else 1
+            max_attempts = 2
             while missing and retry < max_attempts:
                 # Rotate the evidence window on retries as well as between
                 # batches, so a repeated answer gets a genuinely new source
@@ -1301,23 +1387,29 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
                 batch_hits = [hits[(window_start + index) % len(hits)]
                               for index in range(min(evidence_window, len(hits)))]
                 batch_started = time.perf_counter()
-                batch = generate_study_artifact(
-                    kind, prompt, batch_hits, missing, difficulty,
-                    avoid_questions=prior_questions,
-                    variation_seed=f"{variation_seed or 'local'}-{batch_number + 1}-retry-{retry + 1}",
-                    _batch_child=True,
-                )
+                try:
+                    batch = generate_study_artifact(
+                        kind, prompt, batch_hits, missing, difficulty,
+                        avoid_questions=prior_questions,
+                        variation_seed=f"{variation_seed or 'local'}-{batch_number + 1}-retry-{retry + 1}",
+                        _batch_child=True,
+                    )
+                except Exception as exc:
+                    # Invalid or empty output from one small-model batch should
+                    # not abort the whole request. Retry against the next source
+                    # window, then use the deterministic source-grounded agent.
+                    logger.info("Skipping unusable local %s batch %d retry %d: %s",
+                                kind, batch_number + 1, retry + 1, exc)
+                    retry += 1
+                    continue
                 batch_items = batch.get(item_key)
                 logger.info("Study generation batch completed kind=%s batch=%d requested=%d generated=%d duration_seconds=%.2f",
                             kind, batch_number + 1, missing,
                             len(batch_items) if isinstance(batch_items, list) else 0,
                             time.perf_counter() - batch_started)
-                if batch.get("_generation_mode") != "ai" or not isinstance(batch_items, list):
-                    if not combined:
-                        raise ValueError(batch.get(
-                            "_generation_notice", "The local model could not generate a valid set. Check Ollama and retry."
-                        ))
-                    break
+                if batch.get("_generation_mode") not in {"ai", "source_extraction"} or not isinstance(batch_items, list) or not batch_items:
+                    retry += 1
+                    continue
 
                 for item in batch_items:
                     if not isinstance(item, dict):
@@ -1331,6 +1423,8 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
                             or any(_questions_are_equivalent(item_prompt, previous) for previous in prior_questions)):
                         continue
                     combined.append(item)
+                    if batch.get("_generation_mode") == "ai":
+                        model_item_count += 1
                     used_prompts.add(normalized_prompt)
                     prior_questions.append(str(item_prompt))
                     missing -= 1
@@ -1338,30 +1432,71 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
                         break
                 retry += 1
 
+            batch_number += 1
             if missing:
-                # Repetition is a quality issue, not a reason to reject an
-                # otherwise useful deck with HTTP 503. Return only validated,
-                # distinct items and tell the user how many were available.
-                break
+                # Move to another evidence window instead of aborting the entire
+                # generation after one empty or invalid small-model response.
+                continue
+
+        # Complete any remaining slots from distinct source sentences. This is
+        # an in-process evidence-based generator, not a provider/model fallback;
+        # it keeps unusable model JSON from becoming a user-visible 503.
+        if len(combined) < generation_count:
+            if kind == "flashcards":
+                extracted = _source_backed_flashcards(hits, combined, generation_count - len(combined))
+                for card in extracted:
+                    card["evidence"] = card["back"]
+                    combined.append(card)
+            else:
+                existing_quiz = [str(item.get("question", "")) for item in combined]
+                combined.extend(_source_backed_quiz_questions(hits, existing_quiz, generation_count - len(combined)))
+
+        if not combined:
+            return _source_grounded_recovery(kind, hits, generation_count, difficulty, avoid_questions)
 
         result: dict[str, Any] = {item_key: combined}
         if kind == "quiz":
             result["difficulty"] = difficulty
-            if not combined:
-                raise ValueError("The model could not produce a source-supported quiz question. Try a different focus or paper.")
             if len(combined) < generation_count:
                 result["_generation_notice"] = (
                     f"Generated {len(combined)} of {generation_count} valid questions from retrieved paper passages. "
                     "The model could not produce more distinct, source-supported questions within the retry limit. "
                     "Try another focus or paper."
                 )
-        _validate_study_artifact(kind, result, hits)
-        result["_generation_mode"] = "ai"
-        if len(combined) < generation_count and kind == "flashcards":
+        validated_items: list[dict[str, Any]] = []
+        for item in combined:
+            candidate = {item_key: [item]}
+            if kind == "quiz":
+                candidate["difficulty"] = difficulty
+            try:
+                _validate_study_artifact(kind, candidate, hits)
+            except (TypeError, ValueError, KeyError):
+                continue
+            if candidate.get(item_key):
+                validated_items.extend(candidate[item_key])
+        combined = validated_items
+        if not combined:
+            return _source_grounded_recovery(kind, hits, generation_count, difficulty, avoid_questions)
+        result[item_key] = combined
+        result["_generation_mode"] = "ai" if model_item_count else "source_extraction"
+        if len(combined) > model_item_count:
             result["_generation_notice"] = (
-                f"Generated {len(combined)} distinct flashcards from the available paper evidence; "
-                f"you requested {generation_count}. Try a smaller set or a different focus for more variety."
+                f"The local model provided {model_item_count} valid items; source-grounded extraction completed the set with "
+                f"{len(combined) - model_item_count} additional items."
+                if model_item_count else
+                "The model response could not be validated, so these items were built from exact retrieved paper passages."
             )
+        if kind == "quiz" and len(combined) < generation_count:
+            result["_generation_notice"] = (
+                f"Generated {len(combined)} of {generation_count} source-supported questions. "
+                "The retrieved text did not contain enough distinct facts for more questions."
+            )
+        if len(combined) < generation_count and kind == "flashcards":
+            partial_notice = (
+                f"Generated {len(combined)} distinct flashcards from the available paper evidence; "
+                f"you requested {generation_count}."
+            )
+            result["_generation_notice"] = f"{partial_notice} {result.get('_generation_notice', '')}".strip()
         logger.info("Study generation completed kind=%s requested=%d generated=%d duration_seconds=%.2f",
                     kind, generation_count, len(result.get(item_key, [])),
                     time.perf_counter() - generation_started)
@@ -1709,6 +1844,13 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
         else:
             logger.warning("LLM study generation failed kind=%s", kind, exc_info=True)
         if kind in {"flashcards", "quiz", "mindmap"}:
+            if local_ollama and kind in {"flashcards", "quiz"}:
+                try:
+                    return _source_grounded_recovery(
+                        kind, source_hits, generation_count, difficulty, avoid_questions
+                    )
+                except Exception:
+                    logger.warning("Source-grounded recovery could not complete %s", kind, exc_info=True)
             if isinstance(exc, urllib.error.HTTPError):
                 raise
             raise ValueError(_generation_failure_reason(
@@ -2659,16 +2801,51 @@ def _validate_study_artifact(kind: str, result: Any, hits: list[dict[str, Any]])
 
     def resolve_exact_evidence(item: dict[str, Any], kind_name: str) -> None:
         quote = item.get("evidence")
-        if not isinstance(quote, str):
-            raise ValueError(f"{kind_name} needs an exact source quote")
-        quote = re.sub(r"\s+", " ", quote).strip()
-        if not quote:
-            raise ValueError(f"{kind_name} needs an exact source quote")
+        quote = re.sub(r"\s+", " ", quote).strip() if isinstance(quote, str) else ""
         normalized_quote = quote.casefold()
         matching_hit = next((hit for hit in hits
-                             if normalized_quote in re.sub(r"\s+", " ", str(hit.get("content", ""))).strip().casefold()), None)
+                             if normalized_quote and normalized_quote in re.sub(r"\s+", " ", str(hit.get("content", ""))).strip().casefold()), None)
+        claim = item.get("back") if kind_name == "Flashcard" else item.get("explanation")
+        if matching_hit is not None and not _mindmap_claim_is_supported(str(claim or ""), [matching_hit]):
+            matching_hit = None
         if matching_hit is None:
-            raise ValueError(f"{kind_name} source quote does not match the selected paper")
+            # Small local models often invent or miscopy the quote while the
+            # answer itself is grounded. Re-anchor it to the strongest retrieved
+            # passage and construct the quote from that verbatim passage.
+            claim_terms = {word for word in re.findall(r"[a-z0-9]+", str(claim or "").casefold())
+                           if len(word) >= 4}
+            prompt_field = "front" if kind_name == "Flashcard" else "question"
+            prompt_terms = {word for word in re.findall(r"[a-z0-9]+", str(item.get(prompt_field, "")).casefold())
+                            if len(word) >= 4}
+            requested_page = item.get("page")
+            if isinstance(requested_page, str) and requested_page.strip().isdecimal():
+                requested_page = int(requested_page.strip())
+            ranked_hits = []
+            for hit in hits:
+                passage = re.sub(r"\s+", " ", str(hit.get("content", ""))).strip()
+                if not passage or not _mindmap_claim_is_supported(str(claim or ""), [hit]):
+                    continue
+                passage_terms = {word for word in re.findall(r"[a-z0-9]+", passage.casefold()) if len(word) >= 4}
+                claim_overlap = len(claim_terms & passage_terms)
+                prompt_overlap = len(prompt_terms & passage_terms)
+                same_page = int(requested_page == hit.get("page_number"))
+                ranked_hits.append((claim_overlap, prompt_overlap, same_page,
+                                    float(hit.get("score", 0.0) or 0.0), hit, passage))
+            if not ranked_hits:
+                raise ValueError(f"{kind_name} answer is not supported by the selected paper")
+            _, _, _, _, matching_hit, passage = max(ranked_hits, key=lambda item: item[:4])
+            claim_terms = claim_terms or prompt_terms
+            sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+", passage) if part.strip()]
+            quote = max(sentences or [passage], key=lambda text: len(
+                claim_terms & {word for word in re.findall(r"[a-z0-9]+", text.casefold()) if len(word) >= 4}
+            ))
+            if len(quote) > 180:
+                quote = quote[:180].rsplit(" ", 1)[0].rstrip(" ,;:")
+            if len(quote) < 20:
+                quote = passage[:180].strip()
+            normalized_quote = quote.casefold()
+            logger.info("Re-anchored generated %s evidence to retrieved page %s",
+                        kind_name.casefold(), matching_hit.get("page_number"))
         if not 20 <= len(quote) <= 180:
             # Keep the model's exact quote, but repair its length from the
             # surrounding verbatim source text. This does not fabricate or
@@ -2708,7 +2885,6 @@ def _validate_study_artifact(kind: str, result: Any, hits: list[dict[str, Any]])
                 raise ValueError(f"{kind_name} source quote must be 20 to 180 characters")
             if quote.casefold() not in folded_passage:
                 raise ValueError(f"{kind_name} source quote does not match the selected paper")
-        claim = item.get("back") if kind_name == "Flashcard" else item.get("explanation")
         if not isinstance(claim, str) or not _mindmap_claim_is_supported(claim, [matching_hit]):
             raise ValueError(f"{kind_name} answer is not supported by its quoted passage")
         item["evidence"] = quote

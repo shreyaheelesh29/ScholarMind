@@ -6,7 +6,7 @@ export default function QuizPanel({ artifact, answers, setAnswers, onRetake, reg
   const unansweredCount = result?.unanswered ?? Math.max(0, questions.length - answeredCount);
   const incorrectCount = result?.incorrect_answers ?? Math.max(0, answeredCount - score);
 
-  if (!questions.length) return <div className="rounded-xl border border-dashed border-slate-300 bg-white p-8 text-center text-slate-600">Generate a paper-based quiz above to practice here.</div>;
+  if (!questions.length) return <div className="rounded-xl border border-dashed border-slate-300 bg-white p-8 text-center text-slate-600">{artifact?.payload?._generation_notice || "Generate a paper-based quiz above to practice here."}</div>;
 
   return <div className="mx-auto max-w-3xl space-y-4">
     <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white p-4">
