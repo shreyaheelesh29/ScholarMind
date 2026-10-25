@@ -264,6 +264,7 @@ export default function Learning() {
       if (kind === "mindmap") {
         generatedMindmapRef.current = payload;
         setGeneratedMindmap(payload);
+        setMindmapNotice(payload._generation_notice || "");
         setGeneratedMindmapArtifactId(result.artifact.id);
         setSelectedMindmapNodeId("root");
         setCollapsedMindmapNodes(new Set());

@@ -1844,6 +1844,18 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
         else:
             logger.warning("LLM study generation failed kind=%s", kind, exc_info=True)
         if kind in {"flashcards", "quiz", "mindmap"}:
+            if local_ollama and kind == "mindmap":
+                try:
+                    return _source_grounded_mindmap(hits[:12], prompt)
+                except Exception:
+                    logger.warning("Source-grounded mind-map recovery failed", exc_info=True)
+                    return {
+                        "nodes": [], "edges": [], "_generation_mode": "source_extraction",
+                        "_generation_notice": (
+                            "The retrieved text could not support a complete mind map. "
+                            "Try a paper with more readable text or broaden the focus."
+                        ),
+                    }
             if local_ollama and kind in {"flashcards", "quiz"}:
                 try:
                     return _source_grounded_recovery(
@@ -2050,7 +2062,9 @@ def _attach_mindmap_evidence(result: Any, hits: list[dict[str, Any]]) -> None:
         if not label_terms and not is_root:
             raise ValueError(f'Mind map concept "{label[:80]}" has no matchable paper terms')
 
-        best: tuple[int, float, dict[str, Any], str, set[str]] | None = None
+        summary = node.get("summary") if isinstance(node.get("summary"), str) else ""
+        details = node.get("details") if isinstance(node.get("details"), str) else ""
+        best: tuple[int, int, float, dict[str, Any], str, set[str]] | None = None
         for hit, sentence, sentence_terms, slide_terms in passages:
             overlap = label_terms & slide_terms
             # Concept labels are often paraphrases of paper wording. After
@@ -2067,18 +2081,48 @@ def _attach_mindmap_evidence(result: Any, hits: list[dict[str, Any]]) -> None:
             # slides split a heading and its explanation into separate boxes.
             sentence_overlap = label_terms & sentence_terms
             quote_terms = sentence_overlap or (overlap & sentence_terms)
-            candidate = (len(overlap), float(hit.get("score", 0.0) or 0.0), hit, sentence, quote_terms)
-            if best is None or candidate[:2] > best[:2]:
+            claim_support = sum(
+                bool(value) and _mindmap_claim_is_supported(value, [hit])
+                for value in (summary, details)
+            )
+            candidate = (claim_support, len(overlap), float(hit.get("score", 0.0) or 0.0),
+                         hit, sentence, quote_terms)
+            if best is None or candidate[:3] > best[:3]:
                 best = candidate
         if best is None:
             raise ValueError(f'Mind map concept "{label[:80]}" could not be matched to the paper text. Try again with a narrower focus.')
 
-        _, _, hit, sentence, overlap = best
+        _, _, _, hit, sentence, overlap = best
         quote = evidence_window(sentence, overlap)
         if quote is None:
             raise ValueError(f'Mind map concept "{label[:80]}" has no sentence long enough to cite')
         node["page"] = int(hit["page_number"])
         node["evidence"] = quote
+
+        # Prefer a page that supports the model's summary and details. If the
+        # model added unsupported wording, replace only that field with a short
+        # source excerpt so the map remains useful and its citation stays true.
+        page_hits = [item for item in hits if int(item.get("page_number", 0) or 0) == node["page"]]
+        source_claim = re.sub(r"\s+", " ", sentence).strip()
+        if len(source_claim) > 320:
+            source_claim = source_claim[:320].rsplit(" ", 1)[0]
+        for field in ("summary", "details"):
+            value = node.get(field)
+            if not isinstance(value, str) or not _mindmap_claim_is_supported(value, page_hits):
+                replacement = source_claim if _mindmap_claim_is_supported(source_claim, page_hits) else quote
+                node[field] = replacement
+                result["_generation_notice"] = (
+                    "Some mind-map descriptions were replaced with source excerpts to keep their page citations accurate."
+                )
+
+        example = node.get("example")
+        if example and (not isinstance(example, str) or not _mindmap_claim_is_supported(example, page_hits)):
+            node.pop("example", None)
+        for field in ("key_points", "related_concepts"):
+            values = node.get(field)
+            if isinstance(values, list):
+                node[field] = [value for value in values if isinstance(value, str)
+                               and _mindmap_claim_is_supported(value, page_hits)]
 
 
 def _mindmap_expansion_schema() -> dict[str, Any]:
@@ -2172,6 +2216,45 @@ def _extractive_mindmap_children(node_id: str, node_label: str, breadcrumb: list
         if len(children) >= needed:
             break
     return children
+
+
+def _source_grounded_mindmap(hits: list[dict[str, Any]], focus: str = "") -> dict[str, Any]:
+    """Build a fully cited map from source sentences when the local model map is unusable."""
+    readable_hits = [hit for hit in hits if isinstance(hit.get("content"), str)
+                     and len(hit["content"].strip()) >= 20]
+    if not readable_hits:
+        return {
+            "nodes": [], "edges": [], "_generation_mode": "source_extraction",
+            "_generation_notice": "No readable source passages were available to build a cited mind map.",
+        }
+    root_label = re.sub(r"\s+", " ", focus).strip()[:80] or "Paper central topic"
+    root_text = re.sub(r"\s+", " ", str(readable_hits[0]["content"])).strip()
+    root_sentence = next((sentence.strip() for sentence in re.split(r"(?<=[.!?])\s+", root_text)
+                          if len(sentence.strip()) >= 20), root_text[:320])
+    root = {
+        "id": "root", "label": root_label, "summary": root_sentence[:320],
+        "details": root_sentence[:320],
+    }
+    children = _extractive_mindmap_children("root", root_label, [], [root], readable_hits, 4)
+    if len(children) < 4:
+        return {
+            "nodes": [], "edges": [], "_generation_mode": "source_extraction",
+            "_generation_notice": (
+                "The selected passages could not support four distinct mind-map branches. "
+                "Try a paper with more readable text or a broader focus."
+            ),
+        }
+    result: dict[str, Any] = {
+        "nodes": [root, *children],
+        "edges": [{"source": "root", "target": child["id"], "label": "includes"}
+                  for child in children],
+        "_generation_mode": "source_extraction",
+        "_generation_notice": "The local model map did not pass source validation; this map was built from cited source sentences.",
+    }
+    _attach_mindmap_evidence(result, readable_hits)
+    _validate_study_artifact("mindmap", result, readable_hits)
+    result["_generation_mode"] = "source_extraction"
+    return result
 
 
 def _mindmap_claim_is_supported(text: str, hits: list[dict[str, Any]]) -> bool:

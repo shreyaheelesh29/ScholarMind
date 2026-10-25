@@ -36,7 +36,7 @@ export default function MindMapPanel({ mindmapEdges, mindmapRoot, mindmapChildre
               <button onClick={downloadMindmap} disabled={!mindmapRoot} className="rounded-lg bg-primary-600 px-3 py-2 text-sm font-semibold text-white hover:bg-primary-700 disabled:opacity-40">Download outline</button>
             </div>
           </div>
-          {mindmapNodes.length === 0 && <p className="p-8 text-center text-slate-600">No validated mind map was returned. Check your configured AI model, then generate again.</p>}
+          {mindmapNodes.length === 0 && <p className="p-8 text-center text-slate-600">No complete source-grounded mind map could be built from the retrieved passages. Try a paper with more readable text or a broader focus.</p>}
           {mindmapError && <p role="alert" className="border-b border-red-100 bg-red-50 px-5 py-3 text-sm text-red-800">{mindmapError}</p>}
           {mindmapNotice && <p role="status" className="border-b border-emerald-100 bg-emerald-50 px-5 py-3 text-sm text-emerald-800">{mindmapNotice}</p>}
           {mindmapNodes.length > 0 && <div ref={mapViewportRef} onPointerDown={startMindmapPan} onPointerMove={moveMindmapPan} onPointerUp={stopMindmapPan} onPointerCancel={stopMindmapPan} className="relative h-[min(72vh,720px)] min-h-[480px] overflow-hidden touch-none bg-[radial-gradient(#cbd5e1_0.8px,transparent_0.8px)] [background-size:20px_20px] cursor-grab active:cursor-grabbing">
