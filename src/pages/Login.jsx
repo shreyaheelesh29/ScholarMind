@@ -7,9 +7,7 @@ export default function Login() {
   const location = useLocation();
   const searchParams = new URLSearchParams(location.search);
   const requestedPath = searchParams.get("next");
-  const returnPath = typeof location.state?.from === "string" && location.state.from.startsWith("/") && !location.state.from.startsWith("//")
-    ? location.state.from
-    : requestedPath?.startsWith("/") && !requestedPath.startsWith("//") ? requestedPath : "/dashboard";
+  const returnPath = requestedPath?.startsWith("/") && !requestedPath.startsWith("//") ? requestedPath : "/dashboard";
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");

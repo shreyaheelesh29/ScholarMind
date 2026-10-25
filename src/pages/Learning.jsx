@@ -64,11 +64,13 @@ export default function Learning() {
   const [generating, setGenerating] = useState(false);
   const [generationError, setGenerationError] = useState("");
   const [generationMode, setGenerationMode] = useState("");
+  const [flashcardNotice, setFlashcardNotice] = useState("");
   const [selectedMindmapNodeId, setSelectedMindmapNodeId] = useState("root");
   const [collapsedMindmapNodes, setCollapsedMindmapNodes] = useState(() => new Set());
   const [expandingMindmapNodes, setExpandingMindmapNodes] = useState(() => new Set());
   const [mindmapError, setMindmapError] = useState("");
   const [mindmapNotice, setMindmapNotice] = useState("");
+  const [exhaustedMindmapNodes, setExhaustedMindmapNodes] = useState(() => new Set());
   const [pendingMindmapFocusId, setPendingMindmapFocusId] = useState("");
   const [mindmapSearch, setMindmapSearch] = useState("");
   const [mindmapZoom, setMindmapZoom] = useState(1);
@@ -76,9 +78,11 @@ export default function Learning() {
   const [dashboardMetrics, setDashboardMetrics] = useState(null);
   const studySessionIdRef = useRef(null);
   const [tab, setTab] = useState("cards");
+  const studyActivityRef = useRef(tab);
   const mapViewportRef = useRef(null);
   const mapStageRef = useRef(null);
   const panDragRef = useRef(null);
+  useEffect(() => { studyActivityRef.current = tab; }, [tab]);
   useEffect(() => {
     const cached = readLearningSession();
     if (cached) {
@@ -100,6 +104,7 @@ export default function Learning() {
         front: cleanFlashcardText(card.front || card.question || card.title, true),
         back: cleanFlashcardText(card.back || card.answer || card.content),
       })));
+      if (typeof cached.flashcardNotice === "string") setFlashcardNotice(cached.flashcardNotice);
       if (cached.generatedCardsArtifactId) setGeneratedCardsArtifactId(cached.generatedCardsArtifactId);
       if (Array.isArray(cached.cardOrder)) setCardOrder(cached.cardOrder);
       if (cached.cardRatings && typeof cached.cardRatings === "object") setCardRatings(cached.cardRatings);
@@ -114,6 +119,7 @@ export default function Learning() {
       if (typeof cached.mindmapPrompt === "string") setMindmapPrompt(cached.mindmapPrompt);
       if (cached.selectedMindmapNodeId) setSelectedMindmapNodeId(cached.selectedMindmapNodeId);
       if (Array.isArray(cached.collapsedMindmapNodes)) setCollapsedMindmapNodes(new Set(cached.collapsedMindmapNodes));
+      if (Array.isArray(cached.exhaustedMindmapNodes)) setExhaustedMindmapNodes(new Set(cached.exhaustedMindmapNodes));
       if (Number.isFinite(cached.mindmapZoom)) setMindmapZoom(cached.mindmapZoom);
       if (cached.mindmapPan && Number.isFinite(cached.mindmapPan.x) && Number.isFinite(cached.mindmapPan.y)) setMindmapPan(cached.mindmapPan);
       if (["cards", "quiz", "map"].includes(cached.tab)) setTab(cached.tab);
@@ -147,7 +153,8 @@ export default function Learning() {
         await apiFetch(`/study-sessions/${sessionId}/heartbeat`, {
           method: "POST", keepalive: endSession, skipDashboardRefresh: true,
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ elapsed_seconds: elapsedSeconds, end_session: endSession }),
+          body: JSON.stringify({ elapsed_seconds: elapsedSeconds, end_session: endSession,
+            activity_type: studyActivityRef.current === "map" ? "mindmap" : studyActivityRef.current === "quiz" ? "quiz" : "flashcards" }),
         });
       } catch { /* Session tracking must not interrupt study tools. */ }
     };
@@ -161,7 +168,7 @@ export default function Learning() {
           apiFetch(`/study-sessions/${sessionId}/heartbeat`, {
             method: "POST", skipDashboardRefresh: true,
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ elapsed_seconds: 0, end_session: true }),
+            body: JSON.stringify({ elapsed_seconds: 0, end_session: true, activity_type: studyActivityRef.current === "map" ? "mindmap" : studyActivityRef.current === "quiz" ? "quiz" : "flashcards" }),
           }).catch(() => {});
           return;
         }
@@ -246,6 +253,7 @@ export default function Learning() {
       setGenerationMode(payload._generation_mode || "");
       if (kind === "flashcards") {
         const cards = normalizeFlashcards(payload.cards || []);
+        setFlashcardNotice(payload._generation_notice || "");
         setGeneratedCards(cards);
         setGeneratedCardsArtifactId(result.artifact.id);
         setCardOrder(cards.map((_, index) => index));
@@ -259,6 +267,7 @@ export default function Learning() {
         setGeneratedMindmapArtifactId(result.artifact.id);
         setSelectedMindmapNodeId("root");
         setCollapsedMindmapNodes(new Set());
+        setExhaustedMindmapNodes(new Set());
         setMindmapZoom(1);
         setMindmapPan({ x: 0, y: 0 });
         setMindmapError("");
@@ -272,19 +281,19 @@ export default function Learning() {
   useEffect(() => {
     writeLearningSession({
       tab, selectedPaperId, mindmapPrompt, generatedMindmap, generatedMindmapArtifactId,
-      flashcardCount, generatedCardsArtifactId, quizQuestionCount, quizRequestedCount, quizDifficulty,
-      selectedMindmapNodeId, collapsedMindmapNodes: [...collapsedMindmapNodes], mindmapZoom, mindmapPan,
+      flashcardCount, generatedCardsArtifactId, flashcardNotice, quizQuestionCount, quizRequestedCount, quizDifficulty,
+      selectedMindmapNodeId, collapsedMindmapNodes: [...collapsedMindmapNodes], exhaustedMindmapNodes: [...exhaustedMindmapNodes], mindmapZoom, mindmapPan,
       generatedQuiz, quizAnswers, quizSubmitted, quizAttempt, generatedCards, cardOrder, cardRatings,
       retriedCards: [...retriedCards], cardIdx, flipped,
     });
   }, [tab, selectedPaperId, generatedMindmap, generatedMindmapArtifactId, selectedMindmapNodeId,
-    collapsedMindmapNodes, mindmapZoom, mindmapPan, mindmapPrompt, generatedQuiz, quizAnswers, quizSubmitted, quizAttempt,
+    collapsedMindmapNodes, mindmapZoom, mindmapPan, mindmapPrompt, exhaustedMindmapNodes, generatedQuiz, quizAnswers, quizSubmitted, quizAttempt,
     generatedCards, generatedCardsArtifactId, cardOrder, cardRatings, retriedCards, cardIdx, flipped,
-    flashcardCount, quizQuestionCount, quizRequestedCount, quizDifficulty]);
+    flashcardCount, flashcardNotice, quizQuestionCount, quizRequestedCount, quizDifficulty]);
 
   const demoMindmapNodes = [];
   const demoMindmapEdges = [];
-  const visibleCards = generatedCards === null ? flashcards : generatedCards.map((card, i) => ({ id: i + 1, front: cleanFlashcardText(card.front || card.question || card.title || "Study prompt", true), back: cleanFlashcardText(card.back || card.answer || card.content || "No answer supplied") }));
+  const visibleCards = generatedCards === null ? flashcards : generatedCards.map((card, i) => ({ ...card, id: card.id || `flashcard-${i + 1}`, front: cleanFlashcardText(card.front || card.question || card.title || "Study prompt", true), back: cleanFlashcardText(card.back || card.answer || card.content || "No answer supplied") }));
   const masteredCards = Number(dashboardMetrics?.flashcards_mastered) || 0;
   const reviewedCards = Number(dashboardMetrics?.flashcards_reviewed) || 0;
   const totalFlashcards = Number(dashboardMetrics?.flashcards_total) || 0;
@@ -434,6 +443,7 @@ export default function Learning() {
   }, [pendingMindmapFocusId, mindmapNodes]);
   const expandMindmapNode = async (nodeId) => {
     if (!generatedMindmap || expandingMindmapNodes.has(nodeId)) return;
+    if (exhaustedMindmapNodes.has(nodeId)) return;
     if (mindmapNodes.length >= 250) {
       setMindmapError("This map has reached its 250-concept safety limit. No more branches can be added.");
       return;
@@ -454,9 +464,7 @@ export default function Learning() {
     setMindmapNotice("");
     setExpandingMindmapNodes((current) => new Set(current).add(nodeId));
     try {
-      let result;
-      try {
-        result = await requestMindMapExpansion(apiFetch, {
+      const result = await requestMindMapExpansion(apiFetch, {
             paper_id: sourcePaperId,
             node_id: nodeId,
             node_label: parent.label,
@@ -464,47 +472,10 @@ export default function Learning() {
             context: [mindmapPrompt.trim() ? `Map direction: ${mindmapPrompt.trim()}` : "", parent.summary, parent.details, parent.evidence].filter(Boolean).join("\n").slice(0, 1600),
             existing_nodes: mindmapNodes.map(({ id, label }) => ({ id, label })),
           });
-      } catch (error) {
-        // Older backend processes may still be running after an update and lack
-        // the dedicated expansion route. Reuse the original generation API with
-        // the selected branch as its focus so node exploration still works.
-        if (error.status !== 404) throw error;
-        const legacyResult = await apiFetch("/learning/generate", {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            kind: "mindmap", paper_id: sourcePaperId, count: 6,
-            prompt: [
-              `Expand only this selected mind-map branch: ${parent.label}.`,
-              `Path: ${ancestors.join(" > ")}.`,
-              `Create new child concepts under ${parent.label}, not another overall paper map.`,
-              `Avoid these existing concepts: ${mindmapNodes.map((node) => node.label).join(", ")}.`,
-              parent.summary, parent.details, parent.evidence, mindmapPrompt.trim(),
-            ].filter(Boolean).join("\n").slice(0, 1000),
-          }),
-        });
-        const legacyPayload = legacyResult.artifact?.payload || {};
-        const existingLabels = new Set(mindmapNodes.map((node) => node.label?.trim().toLocaleLowerCase()));
-        const legacyChildren = (legacyPayload.nodes || [])
-          .filter((node) => node.id !== "root" && node.label && !existingLabels.has(node.label.trim().toLocaleLowerCase()))
-          .slice(0, 6)
-          .map((node, index) => ({
-            ...node,
-            id: `${nodeId}-${Date.now().toString(36)}-${index}`,
-            summary: node.summary || node.evidence || `${node.label} is discussed in the selected paper.`,
-            details: node.details || node.evidence || `${node.label} is discussed in the selected paper.`,
-            example: node.example || "",
-            key_points: node.key_points || [],
-            related_concepts: node.related_concepts || [],
-            importance: Boolean(node.importance),
-          }));
-        if (!legacyChildren.length) {
-          throw new Error("The older backend could not create distinct child concepts. Restart it and try again.");
-        }
-        result = {
-          parent_id: nodeId,
-          children: legacyChildren,
-          edges: legacyChildren.map((node) => ({ source: nodeId, target: node.id, label: "includes" })),
-        };
+      if (result.exhausted || !(result.children || []).length) {
+        setExhaustedMindmapNodes((current) => new Set(current).add(nodeId));
+        setMindmapNotice(result.message || "No more source-supported subtopics remain under this branch.");
+        return;
       }
       const currentMap = generatedMindmapRef.current || generatedMindmap;
       const existingIds = new Set((currentMap.nodes || []).map((node) => node.id));
@@ -516,7 +487,11 @@ export default function Learning() {
         seenLabels.add(label);
         return true;
       }).slice(0, availableSlots);
-      if (!newChildren.length) throw new Error("The model did not return any new concepts for this branch.");
+      if (!newChildren.length) {
+        setExhaustedMindmapNodes((current) => new Set(current).add(nodeId));
+        setMindmapNotice("No more distinct, source-supported subtopics remain under this branch.");
+        return;
+      }
       const acceptedIds = new Set([...existingIds, ...newChildren.map((node) => node.id)]);
       const newEdges = (result.edges || []).filter((edge) => acceptedIds.has(edge.source) && acceptedIds.has(edge.target)
         && !(currentMap.edges || []).some((existing) => existing.source === edge.source && existing.target === edge.target));
@@ -529,7 +504,8 @@ export default function Learning() {
       setGeneratedMindmap(updatedMap);
       setPendingMindmapFocusId(nodeId);
       setCollapsedMindmapNodes((current) => { const next = new Set(current); next.delete(nodeId); return next; });
-      setMindmapNotice(`Added ${newChildren.length} source-grounded concepts under ${parent.label}.`);
+      setExhaustedMindmapNodes((current) => { const next = new Set(current); next.delete(nodeId); return next; });
+      setMindmapNotice(`Added ${newChildren.length} source-supported concepts under ${parent.label}.`);
       if (generatedMindmapArtifactId) {
         try {
           mindmapSaveQueueRef.current = mindmapSaveQueueRef.current.catch(() => {}).then(() => apiFetch(`/artifacts/${generatedMindmapArtifactId}`, {
@@ -613,9 +589,9 @@ export default function Learning() {
           {availablePapers.length ? availablePapers.map((paper) => <option key={paper.id} value={paper.id}>{paper.filename}</option>) : <option value="">No uploaded papers</option>}
         </select>
         <div className="w-full space-y-1.5">
-          <label htmlFor="mindmap-prompt" className="block text-sm font-semibold text-slate-700">Mind map prompt <span className="font-normal text-slate-400">(optional)</span></label>
-          <textarea id="mindmap-prompt" value={mindmapPrompt} onChange={(event) => setMindmapPrompt(event.target.value)} maxLength={1000} rows={3} placeholder="Tell ScholarMind how to organize the map—for example, focus on the research problem, methods, results, and limitations." className="w-full resize-y rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700 outline-none transition placeholder:text-slate-400 focus:border-primary-400 focus:ring-2 focus:ring-primary-100" />
-          <p className="text-xs text-slate-500">The map will stay grounded in the selected paper. {mindmapPrompt.length}/1000</p>
+          <label htmlFor="mindmap-prompt" className="block text-sm font-semibold text-slate-700">Topic or focus <span className="font-normal text-slate-400">(optional)</span></label>
+          <textarea id="mindmap-prompt" value={mindmapPrompt} onChange={(event) => setMindmapPrompt(event.target.value)} maxLength={1000} rows={3} placeholder="Enter a topic or question—for example, ‘How does the proposed model reduce energy use?’ The map will center on this focus." className="w-full resize-y rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700 outline-none transition placeholder:text-slate-400 focus:border-primary-400 focus:ring-2 focus:ring-primary-100" />
+          <p className="text-xs text-slate-500">ScholarMind will prioritize your topic and use evidence from the selected paper. If the paper doesn’t cover it, it will tell you. {mindmapPrompt.length}/1000</p>
         </div>
         <label htmlFor="flashcard-count" className="flex items-center gap-2 text-sm font-semibold text-slate-700">Cards
           <input id="flashcard-count" aria-label="Number of flashcards" type="number" min="1" max="20" step="1" required value={flashcardCount} onChange={(event) => setFlashcardCount(event.target.value)} disabled={generating} className="w-20 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-normal" />
@@ -671,11 +647,11 @@ export default function Learning() {
         ))}
       </div>
 
-      {tab === "cards" && <FlashcardsPanel {...{ visibleCards, cardIdx, cardOrder, cardRatings, setCardIdx, setFlipped, flipped, activeCard, activeCardIdx, rateCard, advanceCard }} />}
+      {tab === "cards" && <FlashcardsPanel {...{ visibleCards, cardIdx, cardOrder, cardRatings, setCardIdx, setFlipped, flipped, activeCard, activeCardIdx, rateCard, advanceCard, notice: flashcardNotice }} />}
 
       {tab === "quiz" && <div><QuizPanel key={generatedQuiz?.id || "quiz"} artifact={generatedQuiz} answers={quizAnswers} setAnswers={setQuizAnswers} onRetake={() => regenerateQuiz()} regenerating={quizRegenerating} submitted={quizSubmitted} onSubmit={submitQuiz} submitting={quizSubmitting} submitError={quizSubmitError} result={quizAttempt} /></div>}
 
-      {tab === "map" && <MindMapPanel {...{mindmapEdges, mindmapRoot, mindmapChildren, mindmapNodes, visibleMindmapNodes, selectedMindmapNode, selectedMindmapPath, selectedMindmapPathIds, isDescendantOfSelectedMindmapNode, mindmapPositions, mindmapLayoutWidth, mindmapLayoutHeight, mindmapPan, mindmapZoom, collapsedMindmapNodes, expandingMindmapNodes, mindmapError, mindmapNotice, mindmapSearch, generatedMindmap, generatedMindmapArtifactId, mindmapPrompt, mapViewportRef, mapStageRef, searchMindmap, downloadMindmap, focusMindmapNode, chooseMindmapNode, expandMindmapNode, startMindmapPan, moveMindmapPan, stopMindmapPan, setCollapsedMindmapNodes, setSelectedMindmapNodeId, setMindmapZoom, setMindmapPan, setMindmapSearch}} />}
+      {tab === "map" && <MindMapPanel {...{mindmapEdges, mindmapRoot, mindmapChildren, mindmapNodes, visibleMindmapNodes, selectedMindmapNode, selectedMindmapPath, selectedMindmapPathIds, isDescendantOfSelectedMindmapNode, mindmapPositions, mindmapLayoutWidth, mindmapLayoutHeight, mindmapPan, mindmapZoom, collapsedMindmapNodes, exhaustedMindmapNodes, expandingMindmapNodes, mindmapError, mindmapNotice, mindmapSearch, generatedMindmap, generatedMindmapArtifactId, mindmapPrompt, mapViewportRef, mapStageRef, searchMindmap, downloadMindmap, focusMindmapNode, chooseMindmapNode, expandMindmapNode, startMindmapPan, moveMindmapPan, stopMindmapPan, setCollapsedMindmapNodes, setSelectedMindmapNodeId, setMindmapZoom, setMindmapPan, setMindmapSearch}} />}
     </div>
   );
 }

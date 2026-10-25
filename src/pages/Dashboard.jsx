@@ -28,11 +28,22 @@ function formatStudyTime(seconds = 0) {
   return hours ? `${hours}h ${minutes}m` : `${minutes}m`;
 }
 
+const studyActivityLabels = { flashcards: "Flashcards", quiz: "Quiz", mindmap: "Mind maps" };
+const studyActivityColors = { flashcards: "bg-violet-500", quiz: "bg-sky-500", mindmap: "bg-emerald-500" };
+const studyActivityOrder = ["flashcards", "quiz", "mindmap"];
+
+function formatStudyDay(date) {
+  const [year, month, day] = String(date).split("-").map(Number);
+  return new Intl.DateTimeFormat(undefined, { weekday: "short", timeZone: "UTC" })
+    .format(new Date(Date.UTC(year, month - 1, day, 12)));
+}
+
 export default function Dashboard() {
   const [data, setData] = useState(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [lastUpdated, setLastUpdated] = useState(null);
+  const [studyActivityOpen, setStudyActivityOpen] = useState(false);
   const user = getSessionUser();
 
   useEffect(() => {
@@ -95,12 +106,61 @@ export default function Dashboard() {
       {error && <div role="alert" className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800">Could not refresh your dashboard: {error}</div>}
 
       <section aria-label="Your research at a glance" className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        {stats.map((stat) => <article key={stat.title} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        {stats.map((stat) => stat.title === "Study Time" ? <button key={stat.title} type="button"
+          aria-expanded={studyActivityOpen} aria-controls="dashboard-study-activity"
+          onClick={() => setStudyActivityOpen((open) => !open)}
+          className="rounded-2xl border border-slate-200 bg-white p-5 text-left shadow-sm transition hover:shadow-lg hover:shadow-slate-200/60">
+          <p className="text-sm font-medium text-slate-500">{stat.title}</p>
+          <p className="mt-2 text-3xl font-bold text-slate-900">{loading && !data ? "…" : stat.value}</p>
+          <p className="mt-1 text-xs text-slate-400">{stat.description}</p>
+          <span className="mt-3 block text-xs font-semibold text-indigo-600">{studyActivityOpen ? "Hide activity" : "View daily activity"}</span>
+        </button> : <article key={stat.title} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
           <p className="text-sm font-medium text-slate-500">{stat.title}</p>
           <p className="mt-2 text-3xl font-bold text-slate-900">{loading && !data ? "…" : stat.value}</p>
           <p className="mt-1 text-xs text-slate-400">{stat.description}</p>
         </article>)}
       </section>
+
+      {studyActivityOpen && (() => {
+        const days = data?.dashboard_metrics?.study_activity_days || [];
+        const dailyTotals = days.map((day) => studyActivityOrder.reduce((sum, kind) => sum + (Number(day.activities?.[kind]) || 0), 0));
+        const maxDailySeconds = Math.max(1, ...dailyTotals);
+        const activityTotals = studyActivityOrder.map((kind) => ({
+          kind,
+          seconds: days.reduce((sum, day) => sum + (Number(day.activities?.[kind]) || 0), 0),
+        }));
+        return <section id="dashboard-study-activity" aria-label="Study activity this week" className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h2 className="text-base font-bold text-slate-900">Study activity by day</h2>
+              <p className="mt-1 text-sm text-slate-500">Time on the Learning page, grouped by the selected tool · UTC. Activity detail starts from this update.</p>
+            </div>
+            <div className="flex flex-wrap gap-x-4 gap-y-2 text-xs text-slate-600">
+              {activityTotals.map(({ kind, seconds }) => <span key={kind} className="inline-flex items-center gap-1.5">
+                <span className={`h-2.5 w-2.5 rounded-sm ${studyActivityColors[kind]}`} />
+                {studyActivityLabels[kind]} · {formatStudyTime(seconds)}
+              </span>)}
+            </div>
+          </div>
+          <div className="mt-5 grid grid-cols-7 gap-2 sm:gap-4" role="img" aria-label="Stacked bar chart of daily study time by flashcards, quiz, and mind maps">
+            {days.map((day, index) => {
+              const total = dailyTotals[index] || 0;
+              return <div key={day.date} className="flex min-w-0 flex-col items-center gap-2" title={`${formatStudyDay(day.date)}: ${formatStudyTime(total)}`}>
+                <span className="h-4 text-center text-[10px] font-medium text-slate-500 sm:text-xs">{formatStudyTime(total)}</span>
+                <div className="flex h-28 w-full max-w-10 items-end overflow-hidden rounded-md bg-slate-100" aria-hidden="true">
+                  <div className="flex w-full flex-col justify-end" style={{ height: `${Math.max(total ? 5 : 0, total / maxDailySeconds * 100)}%` }}>
+                    {studyActivityOrder.map((kind) => {
+                      const seconds = Number(day.activities?.[kind]) || 0;
+                      return seconds ? <div key={kind} className={`${studyActivityColors[kind]} w-full`} style={{ height: `${seconds / total * 100}%`, minHeight: 2 }} /> : null;
+                    })}
+                  </div>
+                </div>
+                <span className="text-[10px] font-semibold text-slate-600 sm:text-xs">{formatStudyDay(day.date)}</span>
+              </div>;
+            })}
+          </div>
+        </section>;
+      })()}
 
       <section className="grid gap-5 lg:grid-cols-[1.4fr_1fr]">
         <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">

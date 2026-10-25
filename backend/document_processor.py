@@ -9,6 +9,8 @@ import pymupdf
 import pytesseract
 from PIL import Image
 from docx import Document
+from docx.table import Table
+from docx.text.paragraph import Paragraph
 from pptx import Presentation
 
 
@@ -74,26 +76,26 @@ def extract_pdf(file_path: Path) -> dict[str, Any]:
 
 def extract_docx(file_path: Path) -> dict[str, Any]:
     document = Document(file_path)
-
     paragraphs = []
-
-    # Normal paragraphs
-    for paragraph in document.paragraphs:
-        text = paragraph.text.strip()
-
-        if text:
-            paragraphs.append(text)
-
-    # Tables
-    for table in document.tables:
-        for row in table.rows:
-            row_text = " | ".join(
-                cell.text.strip()
-                for cell in row.cells
-            )
-
-            if row_text:
-                paragraphs.append(row_text)
+    # Walk the document body in order so tables stay beside the section that
+    # explains them, and retain heading cues for downstream chunking/retrieval.
+    for element in document.element.body.iterchildren():
+        if element.tag.endswith("}p"):
+            paragraph = Paragraph(element, document)
+            text = paragraph.text.strip()
+            if not text:
+                continue
+            style_name = getattr(paragraph.style, "name", "") or ""
+            if style_name.lower().startswith("heading"):
+                paragraphs.append(f"\n{style_name}: {text}")
+            else:
+                paragraphs.append(text)
+        elif element.tag.endswith("}tbl"):
+            table = Table(element, document)
+            for row in table.rows:
+                row_text = " | ".join(cell.text.strip() for cell in row.cells)
+                if row_text.strip(" |"):
+                    paragraphs.append(row_text)
 
     full_text = "\n\n".join(paragraphs)
 

@@ -94,6 +94,13 @@ CREATE TABLE IF NOT EXISTS study_sessions (
  ended_at TIMESTAMPTZ, duration_seconds INTEGER NOT NULL DEFAULT 0 CHECK (duration_seconds >= 0)
 );
 CREATE INDEX IF NOT EXISTS study_sessions_user_started_idx ON study_sessions(user_id, started_at DESC);
+CREATE TABLE IF NOT EXISTS study_session_activity (
+ user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ activity_date DATE NOT NULL,
+ activity_type TEXT NOT NULL CHECK (activity_type IN ('flashcards', 'quiz', 'mindmap')),
+ duration_seconds INTEGER NOT NULL DEFAULT 0 CHECK (duration_seconds >= 0),
+ PRIMARY KEY (user_id, activity_date, activity_type)
+);
 CREATE TABLE IF NOT EXISTS user_preferences (
  user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
  profile_data JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -123,6 +130,12 @@ CREATE TABLE IF NOT EXISTS paper_chunks (
 );
 CREATE INDEX IF NOT EXISTS paper_chunks_paper_id_idx ON paper_chunks(paper_id);
 CREATE INDEX IF NOT EXISTS paper_chunks_fts_idx ON paper_chunks USING GIN (to_tsvector('english', content));
+CREATE TABLE IF NOT EXISTS paper_semantic_analyses (
+ paper_id UUID PRIMARY KEY REFERENCES papers(id) ON DELETE CASCADE,
+ content_sha256 TEXT NOT NULL,
+ representation JSONB NOT NULL,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 """
 
 @contextmanager
@@ -136,6 +149,17 @@ def initialise() -> None:
         with conn.cursor() as cursor:
             cursor.execute(SCHEMA)
         conn.commit()
+
+
+@contextmanager
+def paper_semantic_analysis_lock(paper_id: str, content_sha256: str) -> Iterator[None]:
+    """Serialize first-time semantic analysis across threads and app workers."""
+    with psycopg.connect(DATABASE_URL) as conn, conn.cursor() as cursor:
+        cursor.execute("SELECT pg_advisory_lock(hashtext(%s), hashtext(%s))", (paper_id, content_sha256))
+        try:
+            yield
+        finally:
+            cursor.execute("SELECT pg_advisory_unlock(hashtext(%s), hashtext(%s))", (paper_id, content_sha256))
 
 
 def sync_admin_emails() -> None:
@@ -237,8 +261,27 @@ def list_papers() -> list[dict[str, Any]]:
 
 def get_paper(paper_id: str) -> dict[str, Any] | None:
     with connection() as conn, conn.cursor(row_factory=psycopg.rows.dict_row) as cursor:
-        cursor.execute("SELECT id::text, owner_id::text, filename, stored_path, page_count, file_type, created_at FROM papers WHERE id = %s", (paper_id,))
+        cursor.execute("SELECT id::text, owner_id::text, filename, stored_path, page_count, file_type, content_sha256, created_at FROM papers WHERE id = %s", (paper_id,))
         return cursor.fetchone()
+
+
+def get_paper_semantic_analysis(paper_id: str, content_sha256: str) -> dict[str, Any] | None:
+    with connection() as conn, conn.cursor(row_factory=psycopg.rows.dict_row) as cursor:
+        cursor.execute("""SELECT representation FROM paper_semantic_analyses
+                       WHERE paper_id = %s AND content_sha256 = %s""", (paper_id, content_sha256))
+        row = cursor.fetchone()
+        return row["representation"] if row else None
+
+
+def save_paper_semantic_analysis(paper_id: str, content_sha256: str,
+                                representation: dict[str, Any]) -> None:
+    with connection() as conn, conn.cursor() as cursor:
+        cursor.execute("""INSERT INTO paper_semantic_analyses (paper_id, content_sha256, representation)
+                       VALUES (%s, %s, %s)
+                       ON CONFLICT (paper_id) DO UPDATE SET content_sha256 = EXCLUDED.content_sha256,
+                       representation = EXCLUDED.representation, created_at = NOW()""",
+                       (paper_id, content_sha256, Jsonb(representation)))
+        conn.commit()
 
 
 def list_paper_annotations(paper_id: str, user_id: str) -> list[dict[str, Any]]:
@@ -493,7 +536,7 @@ def list_user_data(user_id: str) -> dict[str, Any]:
             "collections": collections, "dashboard_metrics": get_dashboard_metrics(user_id)}
 
 
-def get_dashboard_metrics(user_id: str) -> dict[str, int]:
+def get_dashboard_metrics(user_id: str) -> dict[str, Any]:
     """Aggregate current-user learning metrics from persisted records."""
     with connection() as conn, conn.cursor(row_factory=psycopg.rows.dict_row) as cursor:
         cursor.execute("""SELECT
@@ -521,7 +564,28 @@ def get_dashboard_metrics(user_id: str) -> dict[str, int]:
           (SELECT COALESCE(SUM(duration_seconds), 0)::int FROM study_sessions s
              WHERE s.user_id = %s AND s.started_at >= date_trunc('week', NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC') AS study_seconds_week""",
           (user_id, user_id, user_id, user_id, user_id, user_id))
-        return dict(cursor.fetchone() or {})
+        metrics = dict(cursor.fetchone() or {})
+        cursor.execute("""WITH days AS (
+          SELECT generate_series(
+            date_trunc('week', NOW() AT TIME ZONE 'UTC')::date,
+            (date_trunc('week', NOW() AT TIME ZONE 'UTC')::date + 6),
+            INTERVAL '1 day'
+          )::date AS activity_date
+        ), activity AS (
+          SELECT activity_date, activity_type, SUM(duration_seconds)::int AS duration_seconds
+          FROM study_session_activity
+          WHERE user_id = %s
+            AND activity_date >= date_trunc('week', NOW() AT TIME ZONE 'UTC')::date
+            AND activity_date < date_trunc('week', NOW() AT TIME ZONE 'UTC')::date + 7
+          GROUP BY activity_date, activity_type
+        )
+        SELECT days.activity_date::text AS date,
+          COALESCE(jsonb_object_agg(activity.activity_type, activity.duration_seconds)
+            FILTER (WHERE activity.activity_type IS NOT NULL), '{}'::jsonb) AS activities
+        FROM days LEFT JOIN activity USING (activity_date)
+        GROUP BY days.activity_date ORDER BY days.activity_date""", (user_id,))
+        metrics["study_activity_days"] = list(cursor.fetchall())
+        return metrics
 
 
 def update_flashcard_reviews(user_id: str, artifact_id: str, reviews: dict[str, str]) -> bool:
@@ -546,7 +610,8 @@ def start_study_session(user_id: str) -> str:
     return session_id
 
 
-def add_study_session_time(user_id: str, session_id: str, elapsed_seconds: int, end_session: bool = False) -> bool:
+def add_study_session_time(user_id: str, session_id: str, elapsed_seconds: int, end_session: bool = False,
+                           activity_type: str = "flashcards") -> bool:
     """Add a bounded visible-page interval to an owned study session."""
     with connection() as conn, conn.cursor() as cursor:
         cursor.execute("""UPDATE study_sessions SET duration_seconds = duration_seconds + %s,
@@ -554,6 +619,13 @@ def add_study_session_time(user_id: str, session_id: str, elapsed_seconds: int, 
             WHERE id = %s AND user_id = %s AND ended_at IS NULL""",
             (min(max(int(elapsed_seconds), 0), 60), end_session, session_id, user_id))
         updated = cursor.rowcount > 0
+        bounded_seconds = min(max(int(elapsed_seconds), 0), 60)
+        if updated and bounded_seconds:
+            cursor.execute("""INSERT INTO study_session_activity (user_id, activity_date, activity_type, duration_seconds)
+                VALUES (%s, (NOW() AT TIME ZONE 'UTC')::date, %s, %s)
+                ON CONFLICT (user_id, activity_date, activity_type)
+                DO UPDATE SET duration_seconds = study_session_activity.duration_seconds + EXCLUDED.duration_seconds""",
+                (user_id, activity_type, bounded_seconds))
         conn.commit()
         return updated
 
@@ -694,6 +766,32 @@ def hybrid_search(query: str, query_embedding: list[float], paper_ids: list[str]
       FROM fused f JOIN paper_chunks c ON c.id = f.id JOIN papers p ON p.id = c.paper_id ORDER BY f.score DESC LIMIT %(limit)s"""
     with connection() as conn, conn.cursor(row_factory=psycopg.rows.dict_row) as cursor:
         cursor.execute(sql, params)
+        return list(cursor.fetchall())
+
+
+def neighboring_chunks(seed_refs: list[dict[str, Any]], owner_id: str, radius: int = 1) -> list[dict[str, Any]]:
+    """Fetch adjacent indexed chunks for already retrieved source passages."""
+    valid_refs = [ref for ref in seed_refs
+                  if isinstance(ref.get("paper_id"), str) and type(ref.get("chunk_number")) is int]
+    if not valid_refs:
+        return []
+    paper_ids = [ref["paper_id"] for ref in valid_refs]
+    chunk_numbers = [ref["chunk_number"] for ref in valid_refs]
+    with connection() as conn, conn.cursor(row_factory=psycopg.rows.dict_row) as cursor:
+        cursor.execute(
+            """WITH targets AS (
+                   SELECT * FROM unnest(%s::uuid[], %s::int[]) AS target(paper_id, chunk_number)
+               )
+               SELECT DISTINCT p.id::text AS paper_id, p.filename, c.page_number, c.chunk_number,
+                      COALESCE(c.section, 'Document text') AS section, c.content
+               FROM targets t
+               JOIN paper_chunks c ON c.paper_id = t.paper_id
+                   AND c.chunk_number BETWEEN t.chunk_number - %s AND t.chunk_number + %s
+               JOIN papers p ON p.id = c.paper_id
+               WHERE p.owner_id = %s::uuid
+               ORDER BY p.filename, c.chunk_number""",
+            (paper_ids, chunk_numbers, radius, radius, owner_id),
+        )
         return list(cursor.fetchall())
 
 

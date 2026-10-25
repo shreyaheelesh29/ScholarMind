@@ -1,6 +1,8 @@
 # ScholarMind
 AI-powered academic research assistant that uses RAG and LLMs to analyze research papers, generate literature reviews, identify research gaps, create deep explanations, and generate presentations with source citations.
 
+Run `npm test` from the project root to check frontend quiz and flashcard behavior. See [backend/README.md](backend/README.md#tests) for backend test setup and commands.
+
 ## Deploy a shared ScholarMind instance
 
 The normal Vite setup (`npm run dev`) is for local development. It listens on HTTP, so open it as `http://localhost:5173` rather than `https://localhost:5173`. A `localhost` address only works on the same computer; it is not a shared online service.

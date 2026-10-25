@@ -1,6 +1,7 @@
-export default function FlashcardsPanel({ visibleCards, cardIdx, cardOrder, cardRatings, setCardIdx, setFlipped, flipped, activeCard, activeCardIdx, rateCard, advanceCard }) {
+export default function FlashcardsPanel({ visibleCards, cardIdx, cardOrder, cardRatings, setCardIdx, setFlipped, flipped, activeCard, activeCardIdx, rateCard, advanceCard, notice = "" }) {
   return (
         <div className="max-w-3xl mx-auto space-y-6">
+          {notice && <div role="status" className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">{notice}</div>}
           {visibleCards.length === 0 ? <div className="rounded-xl border border-dashed border-slate-300 bg-white p-8 text-center text-slate-600">No validated flashcards were returned. Check the configured AI model, then generate again.</div> : cardIdx >= cardOrder.length ? <div className="rounded-2xl border border-primary-100 bg-white p-10 text-center shadow-sm">
             <p className="text-4xl">🎉</p>
             <h2 className="mt-3 text-2xl font-black text-slate-900">Deck reviewed</h2>
@@ -14,20 +15,21 @@ export default function FlashcardsPanel({ visibleCards, cardIdx, cardOrder, card
             </div>
           </div>
 
-          <div onClick={() => setFlipped(!flipped)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setFlipped((value) => !value); } }} role="button" tabIndex={0} aria-label={flipped ? "Show flashcard question" : "Reveal flashcard answer"} className="relative h-80 cursor-pointer group" style={{ perspective: "1500px" }}>
+          <div onClick={() => setFlipped((value) => !value)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setFlipped((value) => !value); } }} role="button" tabIndex={0} aria-label={flipped ? "Show flashcard question" : "Reveal flashcard answer"} className="relative h-80 cursor-pointer group" style={{ perspective: "1500px" }}>
             <div className="absolute inset-0 transition-transform duration-700" style={{ transformStyle: "preserve-3d", transform: flipped ? "rotateY(180deg)" : "rotateY(0deg)" }}>
               <div className="absolute inset-0 flex flex-col items-center justify-center overflow-hidden rounded-3xl bg-gradient-to-br from-primary-500 via-primary-600 to-accent-500 p-6 text-white shadow-2xl shadow-primary-500/40 sm:p-8" style={{ backfaceVisibility: "hidden" }}>
                 <span className="text-xs font-black uppercase tracking-widest opacity-75 mb-4">Question</span>
-                <div className="max-h-44 w-full max-w-lg overflow-y-auto px-2" onClick={(event) => event.stopPropagation()}>
+                <div className="max-h-44 w-full max-w-lg overflow-y-auto px-2">
                   <h3 className="break-words text-center text-lg font-black leading-snug sm:text-2xl">{activeCard.front}</h3>
                 </div>
                 <p className="mt-8 text-sm opacity-75">Click to reveal answer →</p>
               </div>
               <div className="absolute inset-0 flex flex-col items-center justify-center overflow-hidden rounded-3xl border-2 border-primary-200 bg-white p-6 shadow-2xl sm:p-8" style={{ backfaceVisibility: "hidden", transform: "rotateY(180deg)" }}>
                 <span className="text-xs font-black uppercase tracking-widest text-primary-500 mb-4">Answer</span>
-                <div className="max-h-44 w-full max-w-lg overflow-y-auto px-2" onClick={(event) => event.stopPropagation()}>
+                <div className="max-h-44 w-full max-w-lg overflow-y-auto px-2">
                   <h3 className="break-words text-center text-base font-semibold leading-relaxed text-slate-800 sm:text-lg">{activeCard.back}</h3>
                 </div>
+                {(activeCard.section || activeCard.page) && <p className="mt-3 text-xs text-slate-500">Source{activeCard.section ? ` · ${activeCard.section}` : ""}{activeCard.page ? ` · page ${activeCard.page}` : ""}</p>}
                 <p className="mt-8 text-xs text-slate-400">← Click to flip back</p>
               </div>
             </div>

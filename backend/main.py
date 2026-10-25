@@ -3,8 +3,11 @@ from __future__ import annotations
 import os
 import re
 import hashlib
+import logging
 import random
 import shutil
+import threading
+import time
 import uuid
 from io import BytesIO
 from functools import lru_cache
@@ -33,16 +36,22 @@ from database import (create_user, find_user_by_email, get_paper, get_user, hybr
                       mark_user_notifications_read, update_user_settings, record_activity, record_login, save_artifact,
                       save_paper_annotation, delete_paper_annotation,
                       save_chat_message, save_chunks, save_paper_if_unique, sync_admin_emails,
-                      find_duplicate_paper, delete_user_collection, list_user_collections,
-                      save_user_collection, update_user_collection, user_owns_artifacts, list_paper_chunks,
-                      update_flashcard_reviews, start_study_session, add_study_session_time,
-                      save_quiz_attempt, get_user_artifact, get_dashboard_metrics)
-from rag import (ai_provider_status, answer, citations_for, chat_retrieval_query,
-                 deduplicate_chat_hits, embed, embed_query, expand_mindmap_node,
-                 generate_study_artifact)
+                      find_duplicate_paper, delete_user_collection, list_user_collections, neighboring_chunks,
+                      list_paper_chunks, get_paper_semantic_analysis, save_paper_semantic_analysis,
+                      paper_semantic_analysis_lock,
+                       save_user_collection, update_user_collection, user_owns_artifacts,
+                       update_flashcard_reviews, start_study_session, add_study_session_time,
+                       save_quiz_attempt, get_user_artifact, get_dashboard_metrics)
+from rag import (ai_provider_status, answer, citations_for, embed, embed_query,
+                 expand_mindmap_node, generate_study_artifact, verify_flashcards,
+                 analyze_document_semantics, plan_flashcard_objectives, generate_planned_flashcards,
+                 _questions_are_equivalent, _validate_study_artifact)
 from document_processor import extract_text
 
 BASE_DIR = Path(__file__).resolve().parent
+logger = logging.getLogger(__name__)
+_semantic_cache_locks: dict[tuple[str, str], threading.Lock] = {}
+_semantic_cache_locks_guard = threading.Lock()
 PAPERS_DIR = Path(os.getenv("PAPER_STORAGE_DIR", str(BASE_DIR / "data" / "papers"))).resolve()
 MAX_UPLOAD_BYTES = 100 * 1024 * 1024
 ALLOWED_EXTENSIONS = {
@@ -133,25 +142,13 @@ class MindMapExpansionResponse(BaseModel):
     children: list[MindMapExpansionNode]
     edges: list[MindMapExpansionEdge]
     generation_mode: str = "ai"
+    exhausted: bool = False
+    message: str | None = None
 
 
 class ArtifactUpdate(BaseModel):
     title: str | None = Field(default=None, max_length=200)
     payload: dict[str, Any] | None = None
-
-
-class PresentationSlide(BaseModel):
-    title: str = Field(min_length=1, max_length=200)
-    content: list[str] = Field(default_factory=list, max_length=30)
-    speaker_notes: str = Field(default="", max_length=10000)
-    page: int | None = Field(default=None, ge=1)
-    pages: list[int] = Field(default_factory=list, max_length=30)
-
-
-class PresentationExportRequest(BaseModel):
-    title: str = Field(default="ScholarMind Presentation", min_length=1, max_length=200)
-    source_label: str = Field(default="Research presentation", max_length=100)
-    slides: list[PresentationSlide] = Field(min_length=1, max_length=30)
 
 
 class FlashcardReviewRequest(BaseModel):
@@ -161,6 +158,7 @@ class FlashcardReviewRequest(BaseModel):
 class StudySessionHeartbeatRequest(BaseModel):
     elapsed_seconds: int = Field(ge=0, le=60)
     end_session: bool = False
+    activity_type: str = Field(default="flashcards", pattern="^(flashcards|quiz|mindmap)$")
 
 
 class QuizAttemptRequest(BaseModel):
@@ -428,7 +426,8 @@ def dashboard_metrics(user: dict[str, Any] = Depends(current_user)):
 @app.post("/api/study-sessions/{session_id}/heartbeat")
 def study_session_heartbeat(session_id: str, payload: StudySessionHeartbeatRequest,
                             user: dict[str, Any] = Depends(current_user)):
-    if not add_study_session_time(user["id"], session_id, payload.elapsed_seconds, payload.end_session):
+    if not add_study_session_time(user["id"], session_id, payload.elapsed_seconds, payload.end_session,
+                                  payload.activity_type):
         raise HTTPException(status_code=404, detail="Study session not found or already ended")
     return {"ok": True}
 
@@ -648,7 +647,11 @@ def upload_paper(
         # ---------------------------------------------------------
         # 3. Extract text
         # ---------------------------------------------------------
+        extraction_started = time.perf_counter()
         extracted = extract_text(file_path)
+        logger.info("Document extraction completed paper_id=%s type=%s pages=%d duration_seconds=%.2f",
+                    paper_id, extension.lstrip("."), extracted["page_count"],
+                    time.perf_counter() - extraction_started)
 
         full_text = extracted["text"]
         pages = extracted["pages"]
@@ -665,6 +668,7 @@ def upload_paper(
         chunks = []
         next_number = 1
 
+        chunk_started = time.perf_counter()
         for page in pages:
             page_chunks = chunk_text(
                 page["text"],
@@ -680,13 +684,18 @@ def upload_paper(
             raise ValueError(
                 "No text chunks could be created from this file."
             )
+        logger.info("Document chunking completed paper_id=%s chunks=%d duration_seconds=%.2f",
+                    paper_id, len(chunks), time.perf_counter() - chunk_started)
 
         # ---------------------------------------------------------
         # 5. Generate embeddings
         # ---------------------------------------------------------
+        embedding_started = time.perf_counter()
         embeddings = embed(
             [chunk["text"] for chunk in chunks]
         )
+        logger.info("Document embedding completed paper_id=%s chunks=%d duration_seconds=%.2f",
+                    paper_id, len(chunks), time.perf_counter() - embedding_started)
 
         # ---------------------------------------------------------
         # 6. Save paper metadata
@@ -792,6 +801,109 @@ def chat(request: ChatRequest, user: dict[str, Any] = Depends(current_user)):
     return response
 
 
+def _mindmap_output_matches_focus(focus: str, nodes: list[dict[str, Any]]) -> bool:
+    """Make sure a generated map actually follows the requested topic, including paraphrases."""
+    focus_text = re.sub(
+        r"^(?:please\s+)?(?:create|make|generate|build|show|explain|focus(?:\s+on)?|mind\s*map(?:\s+of)?|map\s+out)\s+",
+        "", focus, flags=re.IGNORECASE,
+    ).strip() or focus
+    concepts = [
+        " ".join(str(node.get(field, "")) for field in ("label", "summary", "evidence"))[:700]
+        for node in nodes if isinstance(node, dict) and node.get("id") != "root"
+    ]
+    if len(concepts) < 2:
+        return False
+    vectors = embed([focus_text[:700], *concepts])
+    topic_vector = vectors[0]
+    related_count = sum(
+        sum(left * right for left, right in zip(topic_vector, concept_vector)) >= 0.17
+        for concept_vector in vectors[1:]
+    )
+    required_related = 1 if len(re.findall(r"[a-z0-9]+", focus_text.casefold())) <= 2 else 2
+    return related_count >= required_related
+
+
+def _semantic_representation_for_paper(paper: dict[str, Any], user: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Load cached document understanding or compute it once per paper version."""
+    paper_id = str(paper["id"])
+    chunks = list_paper_chunks([paper_id], user["id"])
+    if not chunks:
+        raise ValueError(f"No indexed source passages are available for {paper.get('filename', 'this paper')}")
+    content_hash = paper.get("content_sha256") or hashlib.sha256(
+        "\n".join(str(chunk.get("content", "")) for chunk in chunks).encode("utf-8")
+    ).hexdigest()
+    cached = get_paper_semantic_analysis(paper_id, content_hash)
+    if cached:
+        logger.info("Document semantic cache hit paper_id=%s chunks=%d", paper_id, len(chunks))
+        return cached, chunks
+    lock_key = (paper_id, content_hash)
+    with _semantic_cache_locks_guard:
+        lock = _semantic_cache_locks.setdefault(lock_key, threading.Lock())
+    with lock:
+        with paper_semantic_analysis_lock(paper_id, content_hash):
+            cached = get_paper_semantic_analysis(paper_id, content_hash)
+            if cached:
+                logger.info("Document semantic cache hit after wait paper_id=%s", paper_id)
+                return cached, chunks
+            started = time.perf_counter()
+            representation = analyze_document_semantics(chunks)
+            save_paper_semantic_analysis(paper_id, content_hash, representation)
+            logger.info("Document semantic analysis completed paper_id=%s sections=%d concepts=%d duration_seconds=%.2f",
+                        paper_id, len(representation.get("sections", [])), len(representation.get("concepts", [])),
+                        time.perf_counter() - started)
+            return representation, chunks
+
+
+def _verify_flashcard_candidates(cards: list[dict[str, Any]], paper_ids: list[str],
+                                user: dict[str, Any],
+                                seed_evidence_by_id: dict[str, list[dict[str, Any]]] | None = None
+                                ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Verify against both objective-retrieved source evidence and question search."""
+    if not cards:
+        return [], []
+    started = time.perf_counter()
+    evidence_by_id: dict[str, list[dict[str, Any]]] = {}
+    seed_refs: list[dict[str, Any]] = []
+    hits_by_id: dict[str, list[dict[str, Any]]] = {}
+    seed_evidence_by_id = seed_evidence_by_id or {}
+    for card in cards:
+        card_id = str(card.get("id", ""))
+        question = str(card.get("front", "")).strip()
+        if not card_id or not question:
+            hits_by_id[card_id] = []
+            continue
+        question_hits = hybrid_search(question, embed_query(question), paper_ids, 4, owner_id=user["id"])
+        hits_by_id[card_id] = question_hits
+        seed_refs.extend({"paper_id": hit["paper_id"], "chunk_number": hit["chunk_number"]}
+                         for hit in [*seed_evidence_by_id.get(card_id, []), *question_hits[:2]]
+                         if hit.get("paper_id") and type(hit.get("chunk_number")) is int)
+    adjacent = neighboring_chunks(seed_refs, user["id"], radius=1) if seed_refs else []
+    all_evidence: list[dict[str, Any]] = []
+    for card in cards:
+        card_id = str(card.get("id", ""))
+        question_hits = hits_by_id.get(card_id, [])
+        selected = list(seed_evidence_by_id.get(card_id, []))
+        for hit in question_hits[:2]:
+            if all((hit.get("paper_id"), hit.get("chunk_number")) !=
+                   (item.get("paper_id"), item.get("chunk_number")) for item in selected):
+                selected.append(hit)
+        for seed in [*seed_evidence_by_id.get(card_id, []), *question_hits[:2]]:
+            for neighbor in adjacent:
+                if (neighbor["paper_id"] == seed["paper_id"]
+                        and abs(int(neighbor["chunk_number"]) - int(seed["chunk_number"])) <= 1
+                        and all((neighbor["paper_id"], neighbor["chunk_number"]) !=
+                                (item["paper_id"], item["chunk_number"]) for item in selected)):
+                    selected.append(neighbor)
+        selected = selected[:6]
+        evidence_by_id[card_id] = selected
+        all_evidence.extend(selected)
+    verified = verify_flashcards(cards, evidence_by_id)
+    unique_evidence = {(hit["paper_id"], hit["chunk_number"]): hit for hit in all_evidence}
+    logger.info("Flashcard question retrieval completed cards=%d evidence_chunks=%d duration_seconds=%.2f",
+                len(cards), len(unique_evidence), time.perf_counter() - started)
+    return verified, list(unique_evidence.values())
+
+
 @app.post("/api/learning/generate", status_code=201)
 def generate_learning(payload: GenerateRequest, user: dict[str, Any] = Depends(current_user)):
     custom_presentation = payload.kind == "ppt_outline" and payload.presentation_input_type in {"notes", "topic"}
@@ -834,80 +946,210 @@ def generate_learning(payload: GenerateRequest, user: dict[str, Any] = Depends(c
     topic_query = retrieval_topics.get(payload.kind)
     if custom_presentation:
         query = payload.source_text.strip()
+    elif payload.kind == "mindmap" and focus:
+        query = focus
     elif topic_query:
         query = f"{topic_query} {focus} from {paper_names}".strip()
     elif focus:
         query = focus
     else:
         query = f"key findings and main ideas from {paper_names}"
-    if not custom_presentation and payload.kind == "ppt_outline":
-        # Presentations should represent the full selected source.
-        hits = list_paper_chunks(paper_ids, user["id"])
-    elif not custom_presentation:
-        query_embedding = embed_query(query)
-        cross_paper_kinds = {"comparison", "literature_review", "research_gap", "research_ideas"}
-        if payload.kind in {"flashcards", "quiz"}:
-            focus_terms = f"{focus} {paper_names}".strip()
-            retrieval_queries = [
-                f"definitions terminology concepts background motivation {focus_terms}",
-                f"methods methodology materials procedures design {focus_terms}",
-                f"results findings evidence measurements outcomes {focus_terms}",
-                f"discussion limitations conclusions implications {focus_terms}",
-            ]
-            if payload.kind == "quiz" and payload.variation_seed:
-                query_offset = sum(ord(character) for character in payload.variation_seed) % len(retrieval_queries)
-                retrieval_queries = retrieval_queries[query_offset:] + retrieval_queries[:query_offset]
-            per_query_limit = (6 if payload.kind == "flashcards"
-                               else min(max((payload.count + 3) // 4, 4), 8))
-            hits = []
-            seen_chunks = set()
-            for retrieval_query in retrieval_queries:
-                retrieval_embedding = query_embedding if retrieval_query == query else embed_query(retrieval_query)
-                for hit in hybrid_search(retrieval_query, retrieval_embedding, paper_ids, per_query_limit, owner_id=user["id"]):
-                    chunk_key = (hit["paper_id"], hit.get("chunk_number"), hit["page_number"])
-                    if chunk_key in seen_chunks:
-                        continue
-                    seen_chunks.add(chunk_key)
-                    hits.append(hit)
-                    if len(hits) >= 32:
-                        break
+    retrieval_started = time.perf_counter()
+    query_embedding = embed_query(query)
+    cross_paper_kinds = {"comparison", "literature_review", "research_gap", "research_ideas"}
+    if payload.kind == "mindmap" and focus:
+        # Search for the user's topic directly, then add a couple of close
+        # evidence queries so maps can follow a topic even when the paper uses
+        # different wording from the prompt.
+        focus_queries = [
+            focus,
+            f"{focus} supporting concepts and evidence",
+            f"{focus} mechanisms methods causes outcomes limitations",
+        ]
+        hits = []
+        seen_chunks = set()
+        for focus_query in focus_queries:
+            focus_embedding = query_embedding if focus_query == query else embed_query(focus_query)
+            for hit in hybrid_search(focus_query, focus_embedding, paper_ids, 8, owner_id=user["id"]):
+                chunk_key = (hit["paper_id"], hit.get("chunk_number"), hit["page_number"])
+                if chunk_key in seen_chunks:
+                    continue
+                seen_chunks.add(chunk_key)
+                hits.append(hit)
+                if len(hits) >= 18:
+                    break
+            if len(hits) >= 18:
+                break
+    elif payload.kind in {"flashcards", "quiz"}:
+        # Pull evidence from several paper sections so the model has enough
+        # distinct facts for the requested study set instead of seeing only
+        # passages nearest to one broad query.
+        focus_terms = f"{focus} {paper_names}".strip()
+        retrieval_queries = [
+            f"definitions terminology concepts background motivation {focus_terms}",
+            f"methods methodology materials procedures design {focus_terms}",
+            f"results findings evidence measurements outcomes {focus_terms}",
+            f"discussion limitations conclusions implications {focus_terms}",
+        ]
+        # Share the evidence budget across all four facets; a large per-query
+        # limit otherwise fills the cap with definitions and methods before
+        # results or discussion can contribute.
+        # Flashcards need a broad enough evidence pool for the source-based
+        # completion path to reach the requested count, especially for large
+        # decks. Quiz generation keeps a smaller per-facet budget.
+        per_query_limit = (6 if payload.kind == "flashcards"
+                           else min(max((payload.count + 3) // 4, 4), 8))
+        if payload.kind == "quiz" and payload.variation_seed:
+            query_offset = sum(ord(character) for character in payload.variation_seed) % len(retrieval_queries)
+            retrieval_queries = retrieval_queries[query_offset:] + retrieval_queries[:query_offset]
+        hits = []
+        seen_chunks = set()
+        for retrieval_query in retrieval_queries:
+            retrieval_embedding = query_embedding if retrieval_query == query else embed_query(retrieval_query)
+            for hit in hybrid_search(retrieval_query, retrieval_embedding, paper_ids, per_query_limit, owner_id=user["id"]):
+                chunk_key = (hit["paper_id"], hit.get("chunk_number"), hit["page_number"])
+                if chunk_key in seen_chunks:
+                    continue
+                seen_chunks.add(chunk_key)
+                hits.append(hit)
                 if len(hits) >= 32:
                     break
-        elif payload.kind in cross_paper_kinds and len(paper_ids) > 1:
-            per_paper_limit = max(1, min(4, payload.count // len(paper_ids)))
-            hits = []
-            for selected_id in paper_ids:
-                hits.extend(hybrid_search(query, query_embedding, [selected_id], per_paper_limit, owner_id=user["id"]))
-        else:
-            retrieval_limit = min(payload.count, 10)
-            hits = hybrid_search(query, query_embedding, paper_ids, retrieval_limit, owner_id=user["id"])
+            if len(hits) >= 32:
+                break
+    elif payload.kind in cross_paper_kinds and len(paper_ids) > 1:
+        # Retrieve independently per selected paper so a single document cannot crowd out the others.
+        per_paper_limit = max(1, min(4, payload.count // len(paper_ids)))
+        hits = []
+        for selected_id in paper_ids:
+            hits.extend(hybrid_search(query, query_embedding, [selected_id], per_paper_limit, owner_id=user["id"]))
+    else:
+        retrieval_limit = min(payload.count * 2, 20) if payload.kind == "quiz" else min(payload.count, 10)
+        hits = hybrid_search(query, query_embedding, paper_ids, retrieval_limit, owner_id=user["id"])
     if not hits:
+        if payload.kind == "mindmap" and focus:
+            raise HTTPException(status_code=422, detail=f'The selected paper does not appear to cover "{focus}". Try a topic discussed in the paper.')
         raise HTTPException(status_code=404, detail="No text passages found for this paper")
+    logger.info("Study evidence retrieved kind=%s requested_count=%d papers=%d chunks=%d duration_seconds=%.2f",
+                payload.kind, payload.count, len(paper_ids), len(hits), time.perf_counter() - retrieval_started)
     try:
         if payload.kind == "mindmap" and focus:
-            stop_words = {"about", "from", "with", "this", "that", "paper", "focus", "map", "mind", "please", "explain", "show", "create", "generate", "the", "and", "for"}
-            topic_terms = {term for term in re.findall(r"[a-z0-9]+", focus.casefold())
-                           if len(term) > 2 and term not in stop_words}
-            evidence_terms = {term for hit in hits for term in re.findall(r"[a-z0-9]+", str(hit.get("content", "")).casefold())}
-            if topic_terms and not topic_terms.intersection(evidence_terms):
-                raise HTTPException(status_code=422, detail=f'The selected paper does not contain evidence for "{focus}". Try a topic covered by the paper.')
+            # Semantic matching accepts synonyms and paraphrases (e.g. a user
+            # asks about "solar power" while the paper says "photovoltaics").
+            topic_text = re.sub(
+                r"^(?:please\s+)?(?:create|make|generate|build|show|explain|focus(?:\s+on)?|mind\s*map(?:\s+of)?|map\s+out)\s+",
+                "", focus, flags=re.IGNORECASE,
+            ).strip() or focus
+            focus_passages = [str(hit.get("content", ""))[:1400] for hit in hits[:12]]
+            focus_vectors = embed([topic_text[:700], *focus_passages])
+            topic_vector = focus_vectors[0]
+            best_similarity = max(
+                (sum(left * right for left, right in zip(topic_vector, passage_vector))
+                 for passage_vector in focus_vectors[1:]),
+                default=0.0,
+            )
+            if best_similarity < 0.18:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f'The selected paper does not appear to cover "{focus}". Try a topic discussed in the paper.',
+                )
         generation_prompt = focus if payload.kind == "mindmap" else query
-        content = generate_study_artifact(
-            payload.kind,
-            focus or ("Create a balanced, source-wide presentation covering the major sections, methods, findings, and limitations in the provided material."
-                      if payload.kind == "ppt_outline" else query),
-            hits,
-            payload.count,
-            payload.difficulty,
-            avoid_questions=payload.avoid_questions,
-            variation_seed=payload.variation_seed,
-            presentation_purpose=payload.presentation_purpose,
-            presentation_input_type=payload.presentation_input_type,
-        )
+        generation_started = time.perf_counter()
+        if payload.kind == "flashcards":
+            semantic_started = time.perf_counter()
+            representations = []
+            for paper in papers:
+                representation, _ = _semantic_representation_for_paper(paper, user)
+                representations.append(representation)
+            logger.info("Flashcard semantic representation ready papers=%d duration_seconds=%.2f",
+                        len(representations), time.perf_counter() - semantic_started)
+            objectives = plan_flashcard_objectives(representations, payload.count)
+            # Add concept-specific meaning to the plan prompt sent to the card writer.
+            for objective in objectives:
+                matching = [concept for representation in representations
+                            for concept in representation.get("concepts", [])
+                            if _questions_are_equivalent(objective["concept"], concept.get("name"))
+                            or objective["concept"].casefold() in str(concept.get("name", "")).casefold()]
+                objective["document_context"] = " ".join(
+                    [str(concept.get("meaning", "")) for concept in matching[:2]]
+                    + [str(rep.get("summary", ""))[:500] for rep in representations[:2]])[:1400]
+            evidence_by_objective: dict[str, list[dict[str, Any]]] = {}
+            all_objective_evidence: dict[tuple[str, int], dict[str, Any]] = {}
+            for objective in objectives:
+                query_text = f"{objective['query']} {objective['concept']} {objective['objective']}"
+                objective_hits = hybrid_search(query_text, embed_query(query_text), paper_ids, 5, owner_id=user["id"])
+                selected = list(objective_hits[:3])
+                seeds = [{"paper_id": hit["paper_id"], "chunk_number": hit["chunk_number"]}
+                         for hit in objective_hits[:2] if hit.get("paper_id") and type(hit.get("chunk_number")) is int]
+                adjacent = neighboring_chunks(seeds, user["id"], radius=1) if seeds else []
+                for seed in objective_hits[:2]:
+                    for neighbor in adjacent:
+                        if (neighbor["paper_id"] == seed["paper_id"]
+                                and abs(int(neighbor["chunk_number"]) - int(seed["chunk_number"])) <= 1
+                                and all((neighbor["paper_id"], neighbor["chunk_number"]) !=
+                                        (item["paper_id"], item["chunk_number"]) for item in selected)):
+                            selected.append(neighbor)
+                evidence_by_objective[objective["id"]] = selected[:6]
+                all_objective_evidence.update({(hit["paper_id"], hit["chunk_number"]): hit for hit in selected})
+            usable_objectives = [objective for objective in objectives if evidence_by_objective.get(objective["id"])]
+            candidates = generate_planned_flashcards(usable_objectives, evidence_by_objective)
+            candidates = [dict(card, id=card["id"]) for card in candidates]
+            verified_cards, verified_evidence = _verify_flashcard_candidates(
+                candidates, paper_ids, user, seed_evidence_by_id=evidence_by_objective
+            )
+            verified_ids = {card["id"] for card in verified_cards}
+            missing_objectives = [objective for objective in usable_objectives if objective["id"] not in verified_ids]
+            if missing_objectives:
+                logger.info("Regenerating unverified flashcards count=%d", len(missing_objectives))
+                replacements = generate_planned_flashcards(missing_objectives, evidence_by_objective)
+                replacement_verified, replacement_evidence = _verify_flashcard_candidates(
+                    replacements, paper_ids, user, seed_evidence_by_id=evidence_by_objective
+                )
+                verified_cards.extend(card for card in replacement_verified if card["id"] not in verified_ids)
+                verified_evidence.extend(replacement_evidence)
+            distinct_cards = []
+            for card in verified_cards:
+                if len(distinct_cards) >= payload.count:
+                    break
+                if any(_questions_are_equivalent(card.get("front"), old.get("front")) for old in distinct_cards):
+                    continue
+                distinct_cards.append(card)
+            content = {"cards": distinct_cards, "_generation_mode": "semantic_verified"}
+            if len(distinct_cards) < payload.count:
+                content["_generation_notice"] = (
+                    f"Verified {len(distinct_cards)} of {payload.count} requested flashcards. "
+                    "The source did not support enough distinct cards after one regeneration attempt."
+                )
+            if not distinct_cards:
+                raise HTTPException(status_code=422,
+                                    detail="No flashcards passed source verification. Try another paper or a smaller count.")
+            _validate_study_artifact("flashcards", {"cards": distinct_cards}, verified_evidence)
+            logger.info("Two-stage flashcard generation completed requested=%d planned=%d verified=%d evidence_chunks=%d duration_seconds=%.2f",
+                        payload.count, len(objectives), len(distinct_cards), len(all_objective_evidence),
+                        time.perf_counter() - generation_started)
+        else:
+            content = generate_study_artifact(
+                payload.kind, generation_prompt, hits, payload.count, payload.difficulty,
+                avoid_questions=payload.avoid_questions, variation_seed=payload.variation_seed,
+            )
+        if payload.kind == "quiz":
+            logger.info("Quiz generation completed requested=%d generated=%d mode=%s duration_seconds=%.2f",
+                        payload.count, len(content.get("questions", [])), content.get("_generation_mode", "ai"),
+                        time.perf_counter() - generation_started)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Study artifact generation failed kind=%s error_type=%s", payload.kind, type(exc).__name__)
+        raise HTTPException(status_code=503,
+                            detail="Study generation could not complete. Check the configured AI provider and try again.") from exc
     if content.get("_generation_mode") == "source_fallback" and payload.kind != "ppt_outline":
         raise HTTPException(status_code=503, detail=content.get("_generation_notice", "AI generation failed. Please try again."))
+    if payload.kind == "mindmap" and focus and not _mindmap_output_matches_focus(focus, content.get("nodes", [])):
+        raise HTTPException(
+            status_code=422,
+            detail=f'The paper has some evidence about "{focus}", but the model could not build a map centered on it. Try a shorter or more specific topic.',
+        )
     if payload.kind == "quiz":
         questions = content.get("questions", [])
         # Shuffle on the server before persistence. The browser receives only
@@ -1042,7 +1284,14 @@ def expand_learning_mindmap(payload: MindMapExpansionRequest, user: dict[str, An
     ])
     hits = hybrid_search(retrieval_query, embed_query(retrieval_query), [payload.paper_id], 12, owner_id=user["id"])
     if not hits:
-        raise HTTPException(status_code=404, detail="No paper passages found for this concept")
+        return {
+            "parent_id": payload.node_id,
+            "children": [],
+            "edges": [],
+            "generation_mode": "source_exhausted",
+            "exhausted": True,
+            "message": "No more relevant, source-supported subtopics were found for this branch.",
+        }
     try:
         return expand_mindmap_node(
             payload.node_id, payload.node_label, payload.breadcrumb, payload.context, existing_nodes, hits,
