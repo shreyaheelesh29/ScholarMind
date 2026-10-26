@@ -981,8 +981,9 @@ def generate_learning(payload: GenerateRequest, user: dict[str, Any] = Depends(c
             if len(hits) >= 32:
                 break
     elif payload.kind == "research_gap":
-        # Search the sections that are most likely to state genuine open issues;
-        # a broad semantic query often returns abstracts and product descriptions.
+        # Search the likely gap sections, then scan every indexed chunk in the
+        # selected papers. A top-k search can miss a limitations paragraph near
+        # the end of a paper, so gap detection must not depend on retrieval rank.
         gap_queries = [
             f"study limitations weaknesses threats to validity scope not evaluated {focus}".strip(),
             f"future work future research unresolved questions open problems {focus}".strip(),
@@ -999,7 +1000,11 @@ def generate_learning(payload: GenerateRequest, user: dict[str, Any] = Depends(c
                         continue
                     seen_chunks.add(chunk_key)
                     hits.append(hit)
-        hits = hits[:32]
+        complete_papers = list_paper_chunks(paper_ids, user["id"])
+        if complete_papers:
+            hits = complete_papers
+        else:
+            hits = hits[:32]
     elif payload.kind in cross_paper_kinds and len(paper_ids) > 1:
         # Retrieve independently per selected paper so a single document cannot crowd out the others.
         # Keep multiple passages from each paper even when many papers are selected.

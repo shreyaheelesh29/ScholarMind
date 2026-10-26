@@ -925,9 +925,9 @@ def filter_research_gap_hits(hits: list[dict[str, Any]]) -> list[dict[str, Any]]
 def _research_gap_evidence_options(hits: list[dict[str, Any]], count: int) -> list[dict[str, Any]]:
     """Build exact, page-linked evidence choices before asking the model to analyze gaps."""
     signals = (
-        ("Stated future work", re.compile(r"\b(?:future work|future research|further work|further research|future direction|we leave .* for future)\b", re.I)),
-        ("Stated limitation", re.compile(r"\b(?:limitations?|shortcomings?|weaknesses?|beyond (?:the )?scope|not addressed|does not address|did not address|not explored|not evaluated|lack of|lacks)\b", re.I)),
-        ("Stated open question", re.compile(r"\b(?:unresolved|open question|open problem|remain(?:s|ed)? (?:an? )?(?:open|unresolved|unclear|unknown)|we plan to|should be (?:explored|investigated|addressed))\b", re.I)),
+        ("Stated future work", re.compile(r"\b(?:future work|future research|future studies|further work|further research|future direction|we leave .* for future|should be explored in future|future investigation)\b", re.I)),
+        ("Stated limitation", re.compile(r"\b(?:limitations?|shortcomings?|weaknesses?|beyond (?:the )?scope|outside (?:the )?scope|not addressed|does not address|did not address|not explored|not evaluated|not considered|not examined|we did not|lack of|lacks|limited to|constrained by)\b", re.I)),
+        ("Stated open question", re.compile(r"\b(?:unresolved|open question|open problem|remain(?:s|ed)? (?:an? )?(?:open|unresolved|unclear|unknown)|we plan to|should be (?:explored|investigated|addressed)|remains to be investigated|requires further investigation)\b", re.I)),
     )
     results: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -956,6 +956,7 @@ def _research_gap_evidence_options(hits: list[dict[str, Any]], count: int) -> li
                 "evidence": sentence,
                 "paper": str(hit["filename"]),
                 "page": int(hit["page_number"]),
+                "chunk_number": hit.get("chunk_number"),
             })
             if len(results) >= count:
                 return results
@@ -1176,6 +1177,18 @@ def generate_study_artifact(kind: str, prompt: str, hits: list[dict[str, Any]], 
         gap_evidence_options = _research_gap_evidence_options(hits, min(count, 8))
         if not gap_evidence_options:
             return _source_research_gap_result(hits, count)
+        # Keep the model context small, but build it from the exact chunks that
+        # contain explicit gap signals found by the complete-document scan.
+        evidence_chunks = {
+            (option["paper"], option["page"], option.get("chunk_number"))
+            for option in gap_evidence_options
+        }
+        focused_hits = [hit for hit in hits if
+                        (str(hit.get("filename", "")), int(hit.get("page_number", 0) or 0),
+                         hit.get("chunk_number")) in evidence_chunks]
+        if focused_hits:
+            hits = focused_hits
+            gap_evidence_options = _research_gap_evidence_options(hits, min(count, 8))
 
     api_key, base_url, local_ollama, model = _provider_settings()
     analysis_kinds = {"comparison", "literature_review", "research_gap", "research_ideas"}
