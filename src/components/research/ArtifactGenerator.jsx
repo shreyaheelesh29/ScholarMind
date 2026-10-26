@@ -121,7 +121,7 @@ function ArtifactPayload({ renderer: Renderer, payload, papers, paperIds, artifa
   return <Renderer payload={payload} papers={papers} paperIds={paperIds} artifact={artifact} />;
 }
 
-export default function ArtifactGenerator({ kinds, heading = "Generate from your paper", multiPaper = false, id, initialPaperId = "", initialPaperIds = [], maxPapers = 10, minPapers = 1, promptContext = "", promptPlaceholder = "Optional focus or topic", renderPayload, onQuizGenerated, quizCount, onQuizCountChange, quizDifficulty, onQuizDifficultyChange }) {
+export default function ArtifactGenerator({ kinds, heading = "Generate from your paper", multiPaper = false, id, initialPaperId = "", initialPaperIds = [], maxPapers = 10, minPapers = 1, promptContext = "", promptPlaceholder = "Optional focus or topic", renderPayload, onQuizGenerated, onVivaGenerated, quizCount, onQuizCountChange, quizDifficulty, onQuizDifficultyChange }) {
   const [papers, setPapers] = useState([]);
   const [paperIds, setPaperIds] = useState([]);
   const [kind, setKind] = useState(kinds[0]);
@@ -163,6 +163,7 @@ export default function ArtifactGenerator({ kinds, heading = "Generate from your
       });
       setArtifact(kind === "quiz" && onQuizGenerated ? null : result.artifact);
       if (kind === "quiz" && onQuizGenerated) onQuizGenerated(result.artifact);
+      if (kind === "viva" && onVivaGenerated) onVivaGenerated(result.artifact, papers.find((paper) => paper.id === paperIds[0]));
     } catch (err) {
       setError(err.status === 502 && err.message === "Request failed (502)"
         ? "The backend connection closed before generation finished. Check that the backend and Ollama are still running, then retry."
