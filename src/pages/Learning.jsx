@@ -176,7 +176,7 @@ export default function Learning() {
         lastCheckpoint = Date.now();
         timer = window.setInterval(() => {
           if (document.visibilityState === "visible") heartbeat();
-        }, 30000);
+        }, 10000);
         document.addEventListener("visibilitychange", onVisibilityChange);
       }).catch(() => {});
     return () => {

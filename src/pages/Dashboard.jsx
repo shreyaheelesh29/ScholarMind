@@ -46,6 +46,7 @@ export default function Dashboard() {
   const [lastUpdated, setLastUpdated] = useState(null);
   const [studyActivityOpen, setStudyActivityOpen] = useState(false);
   const refreshInFlight = useRef(false);
+  const metricRefreshInFlight = useRef(false);
   const mountedRef = useRef(false);
   const user = getSessionUser();
 
@@ -71,19 +72,45 @@ export default function Dashboard() {
     }
   }, []);
 
+  const refreshStudyMetrics = useCallback(async () => {
+    if (metricRefreshInFlight.current) return;
+    metricRefreshInFlight.current = true;
+    try {
+      const metrics = await apiFetch("/dashboard/metrics", { cache: "no-store" });
+      if (mountedRef.current) {
+        setData((current) => current ? ({
+          ...current,
+          dashboard_metrics: { ...current.dashboard_metrics, ...metrics },
+        }) : current);
+        setLastUpdated(new Date());
+      }
+    } catch {
+      // Keep the last successful dashboard values; manual refresh shows errors.
+    } finally {
+      metricRefreshInFlight.current = false;
+    }
+  }, []);
+
   useEffect(() => {
     mountedRef.current = true;
     refreshDashboard();
     const refreshOnDataUpdate = () => refreshDashboard();
     const refreshWhenVisible = () => { if (document.visibilityState === "visible") refreshDashboard(); };
+    const pollMetricsWhenVisible = () => {
+      if (document.visibilityState === "visible") refreshStudyMetrics();
+    };
+    const metricsTimer = window.setInterval(pollMetricsWhenVisible, 10000);
     window.addEventListener("scholarmind-data-updated", refreshOnDataUpdate);
     window.addEventListener("focus", refreshWhenVisible);
+    document.addEventListener("visibilitychange", pollMetricsWhenVisible);
     return () => {
       mountedRef.current = false;
+      window.clearInterval(metricsTimer);
       window.removeEventListener("scholarmind-data-updated", refreshOnDataUpdate);
       window.removeEventListener("focus", refreshWhenVisible);
+      document.removeEventListener("visibilitychange", pollMetricsWhenVisible);
     };
-  }, [refreshDashboard]);
+  }, [refreshDashboard, refreshStudyMetrics]);
 
   const stats = useMemo(() => {
     const artifacts = data?.artifacts || [];
