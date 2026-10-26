@@ -56,6 +56,56 @@ function QuizQuestion({ value }) {
   </article>;
 }
 
+function VivaPayload({ payload, papers, paperIds }) {
+  const [revealed, setRevealed] = useState(() => new Set());
+  const questions = Array.isArray(payload?.questions) ? payload.questions : [];
+  const allRevealed = questions.length > 0 && revealed.size >= questions.length;
+  const sourcePaper = papers.find((paper) => paper.id === paperIds[0]);
+  const toggleAnswer = (index) => setRevealed((current) => {
+    const next = new Set(current);
+    if (next.has(index)) next.delete(index);
+    else next.add(index);
+    return next;
+  });
+
+  if (!questions.length) return <OutputValue value={payload} />;
+  return <div className="space-y-4">
+    <div className="flex flex-wrap items-center justify-between gap-3">
+      <p className="text-sm font-medium text-slate-600">{questions.length} viva {questions.length === 1 ? "question" : "questions"}</p>
+      <button type="button" onClick={() => setRevealed(allRevealed ? new Set() : new Set(questions.map((_, index) => index)))} className="rounded-lg border border-indigo-200 px-3 py-2 text-sm font-semibold text-indigo-700 transition hover:bg-indigo-50">
+        {allRevealed ? "Hide all answers" : "Reveal all answers"}
+      </button>
+    </div>
+    <ol className="space-y-3">
+      {questions.map((item, index) => {
+        const isRevealed = revealed.has(index);
+        const sourceLink = sourcePaper && item.page
+          ? `/viewer?paperId=${encodeURIComponent(sourcePaper.id)}&page=${encodeURIComponent(item.page)}`
+          : null;
+        return <li key={`${item.page || "page"}-${index}`} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm transition hover:border-indigo-200 hover:shadow-md sm:p-5">
+          <div className="flex items-start gap-3">
+            <span className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-indigo-50 text-sm font-bold text-indigo-700">{String(index + 1).padStart(2, "0")}</span>
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <h4 className="min-w-0 flex-1 text-base font-semibold leading-relaxed text-slate-900">{item.question || "Untitled question"}</h4>
+                {sourceLink ? <Link to={sourceLink} className="shrink-0 rounded-full bg-indigo-50 px-3 py-1 text-xs font-semibold text-indigo-700 transition hover:bg-indigo-100">Page {item.page} ↗</Link>
+                  : item.page ? <span className="shrink-0 rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-600">Page {item.page}</span> : null}
+              </div>
+              {isRevealed && <div className="mt-4 rounded-lg border border-emerald-100 bg-emerald-50/70 p-4" role="region" aria-label={`Answer to question ${index + 1}`}>
+                <p className="text-xs font-bold uppercase tracking-wide text-emerald-800">Suggested answer</p>
+                <p className="mt-1 whitespace-pre-wrap text-sm leading-relaxed text-slate-700">{item.answer || "No answer was included."}</p>
+              </div>}
+              <button type="button" aria-expanded={isRevealed} onClick={() => toggleAnswer(index)} className="mt-3 inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-indigo-700 transition hover:bg-indigo-50">
+                {isRevealed ? "Hide answer" : "Reveal answer"}<span aria-hidden="true">{isRevealed ? "↑" : "↓"}</span>
+              </button>
+            </div>
+          </div>
+        </li>;
+      })}
+    </ol>
+  </div>;
+}
+
 function OutputValue({ value }) {
   if (value == null || typeof value === "boolean") return null;
   if (typeof value === "string" || typeof value === "number") return <p className="whitespace-pre-wrap text-sm leading-relaxed text-slate-700">{String(value)}</p>;
@@ -144,7 +194,7 @@ export default function ArtifactGenerator({ kinds, heading = "Generate from your
       {["source_extraction", "source_review"].includes(artifact.payload?._generation_mode) && <p role="status" className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-900">{artifact.payload._generation_notice}</p>}
       {artifact.payload?.difficulty && <p className="text-xs font-medium capitalize text-indigo-700">Difficulty: {artifact.payload.difficulty}</p>}
       {artifact.payload?._generation_mode === "ai" && <p className="text-xs font-medium text-emerald-700">AI-generated from the selected uploaded paper passages</p>}
-      <div className="max-h-[42rem] space-y-3 overflow-auto">{renderPayload ? <ArtifactPayload renderer={renderPayload} payload={artifact.payload} papers={papers} paperIds={paperIds} artifact={artifact} /> : <OutputValue value={artifact.payload} />}</div>
+      <div className="max-h-[42rem] space-y-3 overflow-auto">{renderPayload ? <ArtifactPayload renderer={renderPayload} payload={artifact.payload} papers={papers} paperIds={paperIds} artifact={artifact} /> : kinds.includes("viva") && kind === "viva" ? <VivaPayload payload={artifact.payload} papers={papers} paperIds={paperIds} /> : <OutputValue value={artifact.payload} />}</div>
       {artifact.payload?.citations?.length > 0 && <div className="border-t border-slate-100 pt-3"><p className="text-xs font-bold uppercase tracking-wide text-slate-500">Sources</p><div className="mt-1 flex flex-wrap gap-2">{artifact.payload.citations.map((citation) => <span key={`${citation.number}-${citation.paper_id}-${citation.page}`} className="rounded-full bg-indigo-50 px-2.5 py-1 text-xs text-indigo-800">{citation.paperTitle} · p. {citation.page}</span>)}</div></div>}
     </div>}
   </section>;
