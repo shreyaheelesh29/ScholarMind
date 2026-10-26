@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { apiFetch, getSessionUser } from "../api";
 
@@ -42,36 +42,48 @@ export default function Dashboard() {
   const [data, setData] = useState(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [lastUpdated, setLastUpdated] = useState(null);
   const [studyActivityOpen, setStudyActivityOpen] = useState(false);
+  const refreshInFlight = useRef(false);
+  const mountedRef = useRef(false);
   const user = getSessionUser();
 
-  useEffect(() => {
-    let alive = true;
-    const load = async () => {
-      try {
-        const result = await apiFetch("/me/data");
-        if (alive) {
-          setData(result);
-          setError("");
-          setLastUpdated(new Date());
-        }
-      } catch (loadError) {
-        if (alive) setError(loadError.message);
-      } finally {
-        if (alive) setLoading(false);
+  const refreshDashboard = useCallback(async (showSpinner = false) => {
+    if (refreshInFlight.current) return;
+    refreshInFlight.current = true;
+    if (showSpinner) setRefreshing(true);
+    try {
+      const result = await apiFetch("/me/data", { cache: "no-store" });
+      if (mountedRef.current) {
+        setData(result);
+        setError("");
+        setLastUpdated(new Date());
       }
-    };
-    load();
-    const refreshWhenVisible = () => { if (document.visibilityState === "visible") load(); };
-    window.addEventListener("scholarmind-data-updated", load);
+    } catch (loadError) {
+      if (mountedRef.current) setError(loadError.message);
+    } finally {
+      refreshInFlight.current = false;
+      if (mountedRef.current) {
+        setLoading(false);
+        setRefreshing(false);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    refreshDashboard();
+    const refreshOnDataUpdate = () => refreshDashboard();
+    const refreshWhenVisible = () => { if (document.visibilityState === "visible") refreshDashboard(); };
+    window.addEventListener("scholarmind-data-updated", refreshOnDataUpdate);
     window.addEventListener("focus", refreshWhenVisible);
     return () => {
-      alive = false;
-      window.removeEventListener("scholarmind-data-updated", load);
+      mountedRef.current = false;
+      window.removeEventListener("scholarmind-data-updated", refreshOnDataUpdate);
       window.removeEventListener("focus", refreshWhenVisible);
     };
-  }, []);
+  }, [refreshDashboard]);
 
   const stats = useMemo(() => {
     const artifacts = data?.artifacts || [];
@@ -99,7 +111,7 @@ export default function Dashboard() {
         </div>
         <div className="flex items-center gap-3">
           {lastUpdated && <span className="text-xs text-slate-400">Updated {lastUpdated.toLocaleTimeString()}</span>}
-          <button onClick={() => { setLoading(true); apiFetch("/me/data").then((result) => { setData(result); setError(""); setLastUpdated(new Date()); }).catch((e) => setError(e.message)).finally(() => setLoading(false)); }} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50">Refresh</button>
+          <button type="button" onClick={() => refreshDashboard(true)} disabled={refreshing} aria-label="Refresh dashboard data" className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-wait disabled:opacity-60">{refreshing ? "Refreshing…" : "Refresh"}</button>
         </div>
       </header>
 
