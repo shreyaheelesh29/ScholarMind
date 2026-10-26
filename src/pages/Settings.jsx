@@ -4,12 +4,14 @@ import { apiFetch, clearSession, getSessionUser, saveSessionUser } from "../api"
 import { applyTheme, getTheme } from "../theme";
 
 const emptyProfile = { name: "", email: "", role: "", institution: "", bio: "", field: "", keywords: "", scholar: "", github: "", linkedin: "" };
+const editableProfileFields = ["name", "institution", "bio", "field", "keywords", "scholar", "github", "linkedin"];
 const defaultNotifications = { papers: true, ideas: true, viva: false, newsletter: true, marketing: false };
 
 export default function Settings() {
   const navigate = useNavigate();
   const [tab, setTab] = useState("profile");
   const [profile, setProfile] = useState(emptyProfile);
+  const [savedProfile, setSavedProfile] = useState(emptyProfile);
   const [notifications, setNotifications] = useState(defaultNotifications);
   const [theme, setTheme] = useState(getTheme);
   const [loading, setLoading] = useState(true);
@@ -22,7 +24,9 @@ export default function Settings() {
     apiFetch("/settings").then((settings) => {
       if (!alive) return;
       const user = getSessionUser() || {};
-      setProfile({ ...emptyProfile, ...settings.profile, name: settings.profile?.name || user.name || "", email: settings.profile?.email || user.email || "", role: settings.profile?.role || user.role || "" });
+      const loadedProfile = { ...emptyProfile, ...settings.profile, name: settings.profile?.name || user.name || "", email: settings.profile?.email || user.email || "", role: settings.profile?.role || user.role || "" };
+      setProfile(loadedProfile);
+      setSavedProfile(loadedProfile);
       setNotifications({ ...defaultNotifications, ...settings.notifications });
       setTheme(settings.theme || "system");
       applyTheme(settings.theme || "system");
@@ -35,8 +39,12 @@ export default function Settings() {
     event.preventDefault();
     setSaving(true); setError(""); setMessage("");
     try {
-      const result = await apiFetch("/settings", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ profile: Object.fromEntries(Object.entries(profile).filter(([key]) => key !== "email" && key !== "role")) }) });
-      setProfile((current) => ({ ...current, ...result.profile }));
+      const profileToSave = Object.fromEntries(editableProfileFields
+        .map((key) => [key, String(profile[key] || "").trim()]));
+      const result = await apiFetch("/settings", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ profile: profileToSave }) });
+      const saved = { ...profile, ...result.profile };
+      setProfile(saved);
+      setSavedProfile(saved);
       const user = getSessionUser();
       if (user) saveSessionUser({ ...user, name: result.profile.name });
       setMessage("Profile saved to your account.");
@@ -64,6 +72,7 @@ export default function Settings() {
   };
 
   const updateProfileField = (key, value) => setProfile((current) => ({ ...current, [key]: value }));
+  const profileChanged = Object.keys(profile).some((key) => profile[key] !== savedProfile[key]);
   const tabs = [{ id: "profile", label: "Profile" }, { id: "notifications", label: "Notifications" }, { id: "appearance", label: "Appearance" }, { id: "account", label: "Account" }];
   const notificationOptions = [
     { key: "papers", title: "Paper activity", description: "Show paper uploads and processing activity in the notification menu." },
@@ -82,18 +91,18 @@ export default function Settings() {
 
       <main className="min-w-0 rounded-2xl border border-slate-200 bg-white p-5 sm:p-7">
         {tab === "profile" && <form onSubmit={saveProfile} className="space-y-5">
-          <div><h2 className="text-xl font-bold text-slate-900">Your profile</h2><p className="mt-1 text-sm text-slate-500">Update your research profile. Email and account role are read-only.</p></div>
+          <div className="flex flex-wrap items-start justify-between gap-2"><div><h2 className="text-xl font-bold text-slate-900">Your profile</h2><p className="mt-1 text-sm text-slate-500">Update your research profile. Email and account role are read-only.</p></div>{profileChanged && <span className="rounded-full bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-800">Unsaved changes</span>}</div>
           <div className="grid gap-4 sm:grid-cols-2">
-            <label className="text-sm font-medium text-slate-700">Full name<input required minLength={2} maxLength={120} value={profile.name} onChange={(e) => updateProfileField("name", e.target.value)} className="mt-1.5 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5" /></label>
+            <label className="text-sm font-medium text-slate-700">Full name<input required minLength={2} maxLength={120} value={profile.name} onChange={(e) => updateProfileField("name", e.target.value)} className="mt-1.5 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100" /></label>
             <label className="text-sm font-medium text-slate-700">Email<input value={profile.email} readOnly className="mt-1.5 w-full rounded-lg border border-slate-200 bg-slate-100 px-3 py-2.5 text-slate-500" /></label>
             <label className="text-sm font-medium text-slate-700">Role<input value={profile.role} readOnly className="mt-1.5 w-full rounded-lg border border-slate-200 bg-slate-100 px-3 py-2.5 capitalize text-slate-500" /></label>
-            <label className="text-sm font-medium text-slate-700">Institution<input maxLength={200} value={profile.institution} onChange={(e) => updateProfileField("institution", e.target.value)} placeholder="School, university, or organization" className="mt-1.5 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5" /></label>
-            <label className="text-sm font-medium text-slate-700 sm:col-span-2">Research field<input maxLength={120} value={profile.field} onChange={(e) => updateProfileField("field", e.target.value)} placeholder="e.g. Computer Science" className="mt-1.5 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5" /></label>
-            <label className="text-sm font-medium text-slate-700 sm:col-span-2">Research interests<input maxLength={500} value={profile.keywords} onChange={(e) => updateProfileField("keywords", e.target.value)} placeholder="Keywords separated by commas" className="mt-1.5 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5" /></label>
-            <label className="text-sm font-medium text-slate-700 sm:col-span-2">Short bio<textarea maxLength={1000} rows={4} value={profile.bio} onChange={(e) => updateProfileField("bio", e.target.value)} className="mt-1.5 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5" /></label>
-            {[["scholar", "Google Scholar URL"], ["github", "GitHub profile URL"], ["linkedin", "LinkedIn profile URL"]].map(([key, label]) => <label key={key} className="text-sm font-medium text-slate-700">{label}<input maxLength={500} type="url" value={profile[key]} onChange={(e) => updateProfileField(key, e.target.value)} className="mt-1.5 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5" /></label>)}
+            <label className="text-sm font-medium text-slate-700">Institution<input maxLength={200} value={profile.institution} onChange={(e) => updateProfileField("institution", e.target.value)} placeholder="School, university, or organization" className="mt-1.5 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100" /></label>
+            <label className="text-sm font-medium text-slate-700 sm:col-span-2">Research field<input maxLength={120} value={profile.field} onChange={(e) => updateProfileField("field", e.target.value)} placeholder="e.g. Computer Science" className="mt-1.5 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100" /></label>
+            <label className="text-sm font-medium text-slate-700 sm:col-span-2">Research interests<input maxLength={500} value={profile.keywords} onChange={(e) => updateProfileField("keywords", e.target.value)} placeholder="Keywords separated by commas" className="mt-1.5 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100" /></label>
+            <label className="text-sm font-medium text-slate-700 sm:col-span-2">Short bio<textarea maxLength={1000} rows={4} value={profile.bio} onChange={(e) => updateProfileField("bio", e.target.value)} className="mt-1.5 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100" /></label>
+            {[["scholar", "Google Scholar URL"], ["github", "GitHub profile URL"], ["linkedin", "LinkedIn profile URL"]].map(([key, label]) => <label key={key} className="text-sm font-medium text-slate-700">{label}<input maxLength={500} type="url" value={profile[key]} onChange={(e) => updateProfileField(key, e.target.value)} className="mt-1.5 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100" /></label>)}
           </div>
-          <button disabled={saving} className="rounded-lg bg-indigo-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-indigo-700 disabled:opacity-50">{saving ? "Saving…" : "Save profile"}</button>
+          <div className="flex flex-wrap items-center gap-3"><button disabled={saving || !profileChanged} className="rounded-lg bg-indigo-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50">{saving ? "Saving…" : "Save profile"}</button>{profileChanged && <button type="button" disabled={saving} onClick={() => { setProfile(savedProfile); setError(""); setMessage(""); }} className="rounded-lg border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50">Discard changes</button>}</div>
         </form>}
 
         {tab === "notifications" && <section className="space-y-4"><div><h2 className="text-xl font-bold text-slate-900">Notifications</h2><p className="mt-1 text-sm text-slate-500">In-app alerts are built from your activity history and refresh every few seconds.</p></div>{notificationOptions.map((item) => <label key={item.key} className="flex cursor-pointer items-start justify-between gap-4 rounded-xl border border-slate-100 p-4 hover:bg-slate-50"><span><span className="block text-sm font-semibold text-slate-800">{item.title}</span><span className="mt-1 block text-xs text-slate-500">{item.description}</span></span><input type="checkbox" checked={Boolean(notifications[item.key])} onChange={(e) => updateNotification(item.key, e.target.checked)} className="mt-1 h-4 w-4 accent-indigo-600" /></label>)}</section>}

@@ -621,7 +621,7 @@ export default function Learning() {
           { l: "Flashcards Mastered", v: `${totalFlashcards ? Math.round(masteredCards / totalFlashcards * 100) : 0}%`, sub: `${masteredCards} mastered · ${reviewedCards} reviewed of ${totalFlashcards}`, i: "🃏" },
           { l: "Papers Available", v: dashboardMetrics?.papers_available ?? "—", sub: "Processed in your library", i: "📄" },
           { l: "Mind Map Topics", v: dashboardMetrics?.mindmap_topics ?? "—", sub: "Unique saved paper topics", i: "🗺" },
-          { l: "Study Time", v: formatStudyTime(dashboardMetrics?.study_seconds_week), sub: "This week · UTC", i: "⏱" },
+          { l: "Study Time", v: `${formatStudyTime(dashboardMetrics?.study_seconds_today)} / ${formatStudyTime(dashboardMetrics?.study_seconds_week)}`, sub: "Today / this week · UTC", i: "⏱" },
         ].map((s, i) => (
           <div key={i} className="rounded-2xl border border-slate-200 bg-white p-5 hover:shadow-lg hover:shadow-slate-200/60 transition">
             <div className="flex items-start justify-between">

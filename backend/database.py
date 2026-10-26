@@ -567,9 +567,11 @@ def get_dashboard_metrics(user_id: str) -> dict[str, Any]:
                CASE WHEN jsonb_typeof(a.payload->'nodes') = 'array' THEN a.payload->'nodes' ELSE '[]'::jsonb END
              ) node WHERE node->>'id' = 'root' LIMIT 1), a.title
           ))))::int FROM study_artifacts a WHERE a.user_id = %s AND a.kind = 'mindmap') AS mindmap_topics,
+          (SELECT COALESCE(SUM(a.duration_seconds), 0)::int FROM study_session_activity a
+             WHERE a.user_id = %s AND a.activity_date = (NOW() AT TIME ZONE 'UTC')::date) AS study_seconds_today,
           (SELECT COALESCE(SUM(duration_seconds), 0)::int FROM study_sessions s
              WHERE s.user_id = %s AND s.started_at >= date_trunc('week', NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC') AS study_seconds_week""",
-          (user_id, user_id, user_id, user_id, user_id, user_id))
+          (user_id, user_id, user_id, user_id, user_id, user_id, user_id))
         metrics = dict(cursor.fetchone() or {})
         cursor.execute("""WITH days AS (
           SELECT generate_series(

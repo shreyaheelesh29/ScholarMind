@@ -83,7 +83,7 @@ export default function Dashboard() {
       { title: "Flashcards Mastered", value: `${masteredPercent}%`, description: `${masteredCards} mastered of ${totalCards} available` },
       { title: "Papers Available", value: metrics.papers_available ?? data?.papers?.filter((paper) => paper.chunk_count > 0).length ?? "—", description: "Successfully processed in your library" },
       { title: "Mind Map Topics", value: metrics.mindmap_topics ?? artifacts.filter((item) => item.kind === "mindmap").length, description: "Unique saved topics" },
-      { title: "Study Time", value: formatStudyTime(metrics.study_seconds_week), description: "This week · UTC" },
+      { title: "Study Time", today: formatStudyTime(metrics.study_seconds_today), week: formatStudyTime(metrics.study_seconds_week), description: "Today and this week · UTC" },
     ];
   }, [data]);
 
@@ -111,9 +111,12 @@ export default function Dashboard() {
           onClick={() => setStudyActivityOpen((open) => !open)}
           className="rounded-2xl border border-slate-200 bg-white p-5 text-left shadow-sm transition hover:shadow-lg hover:shadow-slate-200/60">
           <p className="text-sm font-medium text-slate-500">{stat.title}</p>
-          <p className="mt-2 text-3xl font-bold text-slate-900">{loading && !data ? "…" : stat.value}</p>
+          <div className="mt-2 grid grid-cols-2 gap-3">
+            <div><p className="text-xs font-medium text-slate-400">Today</p><p className="text-2xl font-bold text-slate-900">{loading && !data ? "…" : stat.today}</p></div>
+            <div><p className="text-xs font-medium text-slate-400">This week</p><p className="text-2xl font-bold text-slate-900">{loading && !data ? "…" : stat.week}</p></div>
+          </div>
           <p className="mt-1 text-xs text-slate-400">{stat.description}</p>
-          <span className="mt-3 block text-xs font-semibold text-indigo-600">{studyActivityOpen ? "Hide activity" : "View daily activity"}</span>
+          <span className="mt-3 block text-xs font-semibold text-indigo-600">{studyActivityOpen ? "Hide activity" : "View weekly breakdown"}</span>
         </button> : <article key={stat.title} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
           <p className="text-sm font-medium text-slate-500">{stat.title}</p>
           <p className="mt-2 text-3xl font-bold text-slate-900">{loading && !data ? "…" : stat.value}</p>
@@ -132,8 +135,8 @@ export default function Dashboard() {
         return <section id="dashboard-study-activity" aria-label="Study activity this week" className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
-              <h2 className="text-base font-bold text-slate-900">Study activity by day</h2>
-              <p className="mt-1 text-sm text-slate-500">Time on the Learning page, grouped by the selected tool · UTC. Activity detail starts from this update.</p>
+              <h2 className="text-base font-bold text-slate-900">This week’s study activity</h2>
+              <p className="mt-1 text-sm text-slate-500">Daily study time on the Learning page, grouped by tool · UTC. Detailed activity tracking starts from this update.</p>
             </div>
             <div className="flex flex-wrap gap-x-4 gap-y-2 text-xs text-slate-600">
               {activityTotals.map(({ kind, seconds }) => <span key={kind} className="inline-flex items-center gap-1.5">
